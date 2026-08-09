@@ -68,8 +68,8 @@
 \author{}
 \date{\small Subject: \texttt{AppliedPQC/bitcoin-stark-verifier}
   \quad$\cdot$\quad Sources: ePrint 2024/390, 2024/1586
-  \quad$\cdot$\quad 67 tests passing
-  \quad$\cdot$\quad D1 / D2 / D3 fixed, query constrained}
+  \quad$\cdot$\quad 78 tests passing
+  \quad$\cdot$\quad D1 / D2 / D3 fixed, query constrained and threaded}
 
 \begin{document}
 \maketitle
@@ -94,8 +94,9 @@
   \textbf{67 to 44} permutations (predicted $\approx$46) --- 5.0\% of total script weight down to
   \textbf{3.3\%} --- against 1300 permutations of Merkle work, unchanged.
   \item \textbf{The query is now constrained.} The opened row is bound to its leaf, a round's
-  answers are batched into the next target, and the closing identity checks the accumulated sum.
-  What remains is bookkeeping, not arithmetic.
+  answers are batched into the next target, and the accumulated constraints are now \emph{derived}
+  rather than supplied --- see \S15.5. The bookkeeping turned out to be nearly free, and finding
+  that out corrected two things this report had wrong.
   \item \textbf{Two configuration levers remain unused}, worth roughly 20\% of script weight
   between them: \texttt{pow\_bits = 0} where both reference implementations use $\approx$22, and
   the choice of soundness regime, currently the conjectural one.
@@ -147,6 +148,63 @@ WHIR's object of study is not $\RS$ but a subcode carrying one sumcheck-shaped c
   \,\Bigr\}.
   \tag{Def.\ 1}
 \]
+\subsection*{The weight polynomial}
+
+Definition 1 leans on $\hat w$ without saying what it is, and it is worth being
+precise, because every later step is a statement about $\hat w$ and almost all of the
+implementation work is bookkeeping for it.
+
+$\hat w$ is a polynomial in $1+m$ variables,
+\[
+  \hat w(Z,\boldsymbol X)=\hat w(Z,X_{1},\dots,X_{m}),
+\]
+whose first argument $Z$ is a \emph{placeholder for a value of the polynomial being
+tested} and whose remaining arguments $\boldsymbol X$ range over positions on the
+hypercube. Substituting $Z\mapsto\hat f(\boldsymbol b)$ and $\boldsymbol
+X\mapsto\boldsymbol b$ and summing over $\boldsymbol b\in\{0,1\}^{m}$ turns it into a
+single field element, and Definition 1 asks that element to be $\sigma$. So $\hat w$ is
+not a constraint on $f$ pointwise --- it is the \emph{shape} of one aggregate linear
+statement about $f$, and $\sigma$ is its claimed value.
+
+Two restrictions make it usable rather than merely general.
+
+\smallskip
+\noindent\textbf{(i) Linear in $Z$.} Every $\hat w$ WHIR forms has the shape
+\[
+  \hat w(Z,\boldsymbol X)=Z\cdot w(\boldsymbol X),
+  \qquad w \text{ multilinear in } \boldsymbol X,
+\]
+so the sum $\sum_{\boldsymbol b}\hat f(\boldsymbol b)\,w(\boldsymbol b)$ is a sumcheck
+over a \emph{product of two multilinears}. That is what fixes the degree of every round
+polynomial at two, which in turn is why a round sends three values --- and why, with
+$\hat h(0)+\hat h(1)=\sigma$ pinning one of them, only $\hat h(0)$ and $\hat h(\infty)$
+travel. The entire cost model of Section 12 follows from this one line.
+
+\smallskip
+\noindent\textbf{(ii) Closed under the recursion.} Section 6's update
+\[
+  \hat w'(Z,\boldsymbol X)=\hat w(Z,\boldsymbol\alpha,\boldsymbol X)
+  + Z\cdot\sum_{i=0}^{t}\gamma^{\,i+1}\eqp(\boldsymbol z_{i},\boldsymbol X)
+\]
+is linear in $Z$ whenever $\hat w$ is, since binding $\boldsymbol\alpha$ does not touch
+$Z$ and the added term is visibly $Z$ times something. So $\hat w'$ is again of the form
+$Z\cdot w'(\boldsymbol X)$, and the protocol never leaves the class it started in.
+
+\smallskip
+Unfolding (ii) across all $M$ rounds gives the concrete object the verifier ends up
+holding:
+\[
+  w(\boldsymbol X)=\sum_{j} c_{j}\cdot\eqp(\boldsymbol z_{j},\boldsymbol X),
+\]
+a \textbf{weighted sum of equality polynomials} --- that is, nothing more than a list of
+pairs $(c_{j},\boldsymbol z_{j})$. Every constraint the protocol ever accumulates, from
+the initial evaluation query through each round's out-of-domain answer and $t$ shift
+answers, is one entry in that list, and the coefficients $c_{j}$ are powers of the
+batching challenges. \S15 is about carrying that list, and \S15.4 is about what it
+costs to evaluate it.
+
+\subsection*{Evaluation as a special case}
+
 The point of the definition is that a polynomial \emph{evaluation query} is a special case. Taking
 $\hat w(Z,\boldsymbol X)=Z\cdot\eqp(\boldsymbol X,\boldsymbol z)$ gives
 $\sum_{\boldsymbol b}\hat w(\hat f(\boldsymbol b),\boldsymbol b)=\hat f(\boldsymbol z)$, so
@@ -532,18 +590,30 @@ Cost: $\lceil \mathrm{row\_len}/8\rceil$ permutations per query.
 by Horner from the top --- $t+1$ multiplications rather than the $2t$ of forming the powers, the
 outer $\gamma$ being what shifts every exponent up by one. No permutation at all.
 
-\subsection*{The closing identity checks the accumulated sum}
+\subsection*{The closing identity, and two readings of it}
 Each accumulated term collapses, because summing an evaluation against $\eqp$ \emph{is} evaluation:
 \[
   \sum_{\boldsymbol b} \hat f_{M}(\boldsymbol b)\,\gamma^{e}\,\eqp(\boldsymbol z,\boldsymbol b)
   = \gamma^{e}\,\hat f_{M}(\boldsymbol z).
 \]
-So $\hat w'$ is exactly a list of $(\text{weight},\text{point})$ pairs and checking it means
-evaluating the final polynomial at each point and taking the weighted sum. \textbf{This is why no
-$\eqp$ primitive is needed anywhere} --- $\eqp$ survives only inside something nothing touches until
-it becomes an evaluation. An earlier draft of this report assumed otherwise; reading the
-accumulation through shows it is not so, which takes the remaining work from ``build a primitive''
-down to bookkeeping.
+So $\hat w'$ is exactly the list of $(c_{j},\boldsymbol z_{j})$ pairs of \S2, and checking it means
+evaluating the final polynomial at each point and taking the weighted sum. That is self-consistent,
+it is the paper's reading, and \texttt{closing\_check} implements it.
+
+It is not the identity Plonky3 checks. There the two polynomials are kept \emph{apart}, each
+evaluated at its own point:
+\[
+  \underbrace{\texttt{claimed\_eval}}_{\text{the chained claim}}
+  \;=\;
+  \underbrace{w(\boldsymbol R)}_{\texttt{eval\_constraints\_poly}}
+  \;\cdot\;
+  \underbrace{\hat f_{M}(\boldsymbol r_{\mathrm{fin}})}_{\texttt{final\_evaluations.eval\_ext}},
+\]
+and \texttt{eval\_constraints\_poly} evaluates every accumulated $\eqp(\boldsymbol z_{j},\cdot)$
+explicitly. Since this implementation is checked against Plonky3, that is the shape the script must
+produce --- so an $\eqp$ primitive \textbf{is} needed after all. An earlier draft of this report
+concluded from the collapse above that none was; the conclusion was right about the paper and wrong
+about the verifier being targeted, and the gap appears only when the two are put side by side.
 
 Measured, since this is where \texttt{final\_poly\_vars} bites:
 
@@ -564,6 +634,137 @@ Doubling per variable. For the example configuration the accumulated pairs numbe
 $\sum_i (t_i+2)\approx110$, so at $\texttt{final\_poly\_vars}=4$ the closing check is on the order of
 42\,MB against 743\,MB of Merkle work --- about 5\%. It is also a concrete argument for pushing
 folding work into earlier rounds: the cost is $n_{\mathrm{points}}\cdot2^{n_{\mathrm{vars}}}$.
+
+\subsection*{Threading, and why it costs almost nothing}
+
+The list of pairs has to reach the closing check having been \emph{derived}, not supplied. The
+natural guess is that this is expensive: a pair created early should have to be rewritten every
+round, its coefficient absorbing a factor as the sumcheck binds variables. It does not, and the
+reason is one line --- $\eqp$ factorises across a split,
+\[
+  \eqp\bigl((\boldsymbol z_{\mathrm{pre}},\boldsymbol z_{\mathrm{suf}}),
+            (\boldsymbol\alpha,\boldsymbol y)\bigr)
+  =\eqp(\boldsymbol z_{\mathrm{pre}},\boldsymbol\alpha)\cdot
+   \eqp(\boldsymbol z_{\mathrm{suf}},\boldsymbol y),
+\]
+so binding a prefix never mixes coordinates. Constraints can simply be \emph{accumulated}, and at
+the end each is evaluated against the concatenation of every round's folding randomness,
+\[
+  \boldsymbol R=\boldsymbol\alpha^{(0)}\,\|\,\boldsymbol\alpha^{(1)}\,\|\cdots\|\,
+  \boldsymbol\alpha^{(\mathrm{fin})},
+\]
+a constraint of arity $n_{c}$ reading the \textbf{last $n_{c}$ coordinates} of $\boldsymbol R$ ---
+which is what it means for the randomness from round $i$ onwards to be what binds a constraint born
+at round $i$.
+
+On a stack that rule is free. Push $\boldsymbol R$ with $R_{0}$ deepest and the last $n_{c}$
+coordinates are the \emph{topmost} $n_{c}$: every constraint reads from the top, and a longer one
+reaches further down. No slicing, no offset arithmetic, no per-round rewriting. Keeping each round's
+challenge rather than discarding it costs \textbf{76 bytes}, 0.011\% of a round.
+
+A second convenience sits in the point expansion. An out-of-domain sample is a scalar $u$ whose
+constraint point is $(u^{2^{m-1}},\dots,u^{2},u)$; repeated squaring produces $u$ first, so moving
+the block to the altstack top-first lands the coordinates in exactly the order the $\eqp$ evaluation
+consumes them. The two conventions meet without a roll.
+
+\begin{center}\small
+\begin{tabular}{@{}llr@{}}
+\toprule
+\textbf{Primitive} & \textbf{What it is} & \textbf{Cost}\\
+\midrule
+\texttt{eq\_eval} & $\prod_i (1+2z_ir_i-z_i-r_i)$ & $2n$ ext.\ mult.\\
+\texttt{expand\_univariate} & the square-power point & $n-1$ ext.\ mult.\\
+\texttt{constraint\_eval} & $w(\boldsymbol R)$ & per constraint, above\\
+\texttt{sumcheck\_rounds\_fs\_keep} & buries each round's $\alpha$ & 76 B per round\\
+\bottomrule
+\end{tabular}
+\end{center}
+\begin{center}\footnotesize\color{muted}
+None costs a permutation. \texttt{eq\_eval} and \texttt{expand\_univariate} are checked against
+Plonky3's own \texttt{Point::eval\_eq} and \texttt{Point::expand\_from\_univariate}, not only against
+a local reference --- either could otherwise have been a consistent misreading.
+\end{center}
+
+\subsection*{An absorb four times too narrow}
+
+Wiring the threading in exposed a defect the earlier accounting had hidden. Out-of-domain answers
+and the final polynomial are \emph{extension} elements, and Plonky3 observes them with
+\texttt{observe\_algebra\_slice} --- four base elements each, not one. The out-of-domain points are
+also sampled one at a time \emph{between} the answers rather than once after them, so a round costs
+one duplexing per sample and not one per rate block. Transcript permutations for the example
+configuration move from 44 to \textbf{54} and the share from 3.3\% to \textbf{4.0\%}. It is a
+correction in the expensive direction, and the second time this accounting has moved after the
+schedule was \emph{executed} rather than priced.
+
+\section{Does it fit in a Bitcoin transaction?}
+
+Every figure so far is a script length. This is what those lengths mean, priced against a
+\texttt{WhirConfig} derived by Plonky3's own security analysis rather than a schedule written out by
+hand, so the query counts and domain sizes are whatever the analysis actually produces.
+
+Neither of the two limits that bind is the one usually named: Taproot removed the 10\,000-byte
+script cap and the 201-opcode cap, so what is left is \emph{weight} --- 400\,000 units for a
+standard transaction, 4\,000\,000 for a block, witness bytes counting one unit each.
+
+\medskip
+\noindent\fbox{\begin{minipage}{0.96\linewidth}\small
+A single Poseidon2 permutation is 572\,228 bytes, so a standard transaction holds \textbf{0.70} of
+one and an entire block holds \textbf{6.99}. \textbf{The unit that does not fit is not the query ---
+it is one hash.}
+\end{minipage}}
+\medskip
+
+\begin{center}\small
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+$\lambda$ & \texttt{pow} & $m$ & rounds & queries & depth & \textbf{one query} \\
+\midrule
+80  & 0  & 16 & 2 & 21 & 16 & 13.7\,MB $=$ \textbf{3.43 blocks}\\
+80  & 22 & 16 & 2 & 15 & 16 & 13.7\,MB $=$ \textbf{3.43 blocks}\\
+100 & 22 & 16 & 2 & 20 & 16 & 13.7\,MB $=$ \textbf{3.43 blocks}\\
+80  & 22 & 20 & 3 & 15 & 20 & 16.0\,MB $=$ 4.01 blocks\\
+80  & 22 & 24 & 4 & 15 & 24 & 18.3\,MB $=$ 4.58 blocks\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The first three rows are the answer to a question worth separating out. \textbf{Lowering the
+security level buys fewer queries, not cheaper ones.} At $m=16$ the cost of one query is identical
+at 80 and 100 bits, because depth is set by the domain size and not by $\lambda$; what moves is the
+count, 20 down to 15. So no security level puts a query in a transaction --- a query is three to
+five \emph{blocks} throughout.
+
+For the whole verifier the level does buy something, roughly proportionally:
+
+\begin{center}\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$\lambda$ & \texttt{pow} & $m$ & permutations & bytes & blocks\\
+\midrule
+100 & 22 & 16 & 653 & 373{,}664{,}884 & 93.4\\
+80  & 22 & 16 & 497 & 284{,}397{,}316 & \textbf{71.1}\\
+80  & 22 & 20 & 708 & 405{,}137{,}424 & 101.3\\
+80  & 22 & 24 & 934 & 534{,}460{,}952 & 133.6\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+76\% of the cost for 80\% of the security, which is close to linear because query count is close to
+linear in $\lambda$ and query count is very nearly the whole bill.
+
+\medskip
+The same table settles \S16's proof-of-work point more sharply than the small configuration could.
+At $\texttt{pow\_bits}=0$ neither level is derivable at all beyond a toy instance: 100-bit at $m=16$
+already requires 19 bits of grinding, $m=20$ requires 28, and $m=24$ requires 37. Even 80-bit needs
+8 bits at $m=20$. \texttt{pow\_bits: 0} is therefore not a conservative choice --- it is a
+configuration that mostly does not exist.
+
+\medskip
+\noindent\textbf{What this means for the next step.} Chunking is not optional and its unit has to be
+\emph{sub-query}. The natural seam is one Merkle level --- 572\,252 bytes, 0.14 of a block --- with
+the intermediate digest committed between chunks, which is the shape BitVM2's disprove pattern
+already has. Nothing in \S15 changes this: threading is arithmetic, and arithmetic is free at this
+resolution.
 
 \section{Two unused levers}
 
