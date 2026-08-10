@@ -13,7 +13,7 @@ account of the STIR and WHIR proximity tests, what this implementation checks,
 what it does not, and why. Source: [`docs/whir-review.tex`](docs/whir-review.tex).
 
 ```
-cargo test                              # everything, 98 tests
+cargo test                              # everything, 107 tests
 cargo test -p whir --test end_to_end    # a real Plonky3 proof, in script
 cargo test -p whir --test budget        # what it would cost on-chain
 ```
@@ -181,24 +181,41 @@ permutation is already a chain of rounds, each taking a state and leaving a
 state, and `permutation::rounds()` emits them with a test pinning their
 composition to `permute()`.
 
-| | |
-| --- | ---: |
-| rounds per permutation | 29 |
-| largest step | **50,126 B — 12.5% of a standard transaction** |
-| steps per standard transaction | 7 |
-| the whole verifier, 80-bit, 20 vars | 28,855 steps ≈ **4,100 chunks** |
+A step also has to be *bound*. A predicate over supplied states decides nothing
+about whose claim it is — a spender answers one challenge with one state and the
+next with another — so both states come from Winternitz one-time signatures.
+Those fit Bitcoin for the same reason the rest of this does: a hash chain only
+ever hashes a single item, so `OP_HASH160` suffices and no soft fork is needed.
 
-Four thousand chunks is the same order as BitVM2's own leaf count, which is the
-first evidence here that the approach is viable rather than merely smaller.
-`cargo test -p whir --test budget` prints the table for other configurations,
-and `poseidon2::disprove` holds the per-step predicate.
+The Winternitz parameter is forced from above rather than chosen. One chain per
+bit is the cheapest thing to verify and does not work: a state is 496 bits, so
+505 chains, so **1,010 witness items against Bitcoin's 1,000-item stack limit**
+— the script fails before executing an opcode. At `w = 16` a state is 131 chains
+and two signatures are 524 items.
 
-**What the count leaves out.** There is no commitment layer — what stops a
-prover answering one challenge with one state and another with a different one
-is a one-time signature over each committed value, which needs only single-item
-hashing and so no soft fork, but is not here. And the arithmetic between
-permutations does not decompose: 2% of the verifier, which is still 25 MB with
-no step boundaries in it, and so not counted in the 4,100.
+The last saving is to commit at *chunk* boundaries rather than every round,
+since a challenger only executes the run containing the disputed round:
+
+| | bytes | of a standard tx | commitments per permutation |
+| --- | ---: | ---: | ---: |
+| one committed round | 94,020 | 23.5% | 29 |
+| a **22-round chunk** | 395,916 | 99.0% | **2** |
+
+22 is longer than dividing the budget by a round suggests, because the rounds
+differ by 6×: an external round applies the S-box to all sixteen state elements
+(50,028 B), an internal round to one (8,434 B), and the eight external rounds
+sit at opposite ends so no window of 22 holds more than four. `max_chunk_len`
+takes the length whose *worst* window fits, not the budget over the mean.
+
+The 80-bit, 20-variable verifier is then **≈2,000 chunks**, the same order as
+BitVM2's own leaf count — and because the commitments *are* the setup, that
+figure bounds setup as well as the spend.
+
+**What the count leaves out.** Generating the keys: 2,000 boundaries at 131
+chains each is roughly a quarter of a million hash chains, which is the cost
+BitVM2 deployments actually struggle with. And the arithmetic between
+permutations does not decompose — 2% of the verifier, still 25 MB with no step
+boundaries in it, and so not counted in the 2,000.
 
 
 ## Security parameters
@@ -211,9 +228,26 @@ KoalaBear gives log₂(p) = 30.989 and degree 4, so 123.955 bits are available a
 the field is never what binds.
 
 The soundness regime is `SecurityAssumption::CapacityBound`, the cheapest of the
-three by a factor of 3.7 in verifier hashes — here, directly, in script bytes —
-and the only one resting on the unproven half of WHIR's Conjecture 4.12. A
-verifier that settles bitcoin should say out loud which assumption it stands on.
+three and the only one resting on the unproven half of WHIR's Conjecture 4.12.
+Nothing in the implementation mentions a soundness assumption — the script
+executes a schedule, and the regime reaches it only as a query count — so the
+choice is a config change. `cargo test -p whir --test budget` prices it, giving
+each regime the grinding it needs:
+
+| regime | vars | pow | queries | permutations | vs CB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| UD, proved | 16 | 0 | 110 | 7,376 | **7.18×** |
+| JB, Conj. 4.12(1) | 16 | 26 | 39 | 1,853 | 1.80× |
+| CB, Conj. 4.12(2) | 16 | 19 | 21 | 1,027 | 1.00× |
+| UD, proved | 20 | 0 | 110 | 11,171 | **9.01×** |
+| JB | 20 | 33 | 35 | 2,222 | 1.79× |
+| CB | 20 | 28 | 19 | 1,240 | 1.00× |
+
+UD wants no grinding at all and pays entirely in queries, capped at 110
+regardless of size — so the gap widens with the witness rather than staying
+fixed. JB wants *more* grinding than CB, which is the direction a weaker
+assumption should push. A verifier that settles bitcoin should say out loud
+which assumption it stands on, and what the proved one would cost.
 
 ## Credits
 

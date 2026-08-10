@@ -220,14 +220,30 @@ For $\alpha\in\mathbb{F}$ and $y=x^{2}$,
   \Fold(f,\alpha)(x^{2}) \;=\; \frac{f(x)+f(-x)}{2}
   \;+\; \alpha\cdot\frac{f(x)-f(-x)}{2x},
 \]
-extended to $\boldsymbol\alpha$ by iteration. The structural fact is that folding is multilinear
-partial evaluation seen through the code: if $f\in\RS[\mathbb{F},\mathcal{L},m]$ then
+extended to $\boldsymbol\alpha=(\alpha_{1},\dots,\alpha_{k})$ by iteration. The structural fact is
+that folding is multilinear partial evaluation seen through the code: if
+$f\in\RS[\mathbb{F},\mathcal{L},m]$ then
 \[
   \Fold(f,\boldsymbol\alpha)\in\RS[\mathbb{F},\mathcal{L}^{(2^{k})},m-k],
   \qquad
-  \hat g(X_{k},\dots,X_{m})=\hat f(\boldsymbol\alpha,X_{k},\dots,X_{m}).
+  \hat g(X_{k+1},\dots,X_{m})=\hat f(\boldsymbol\alpha,X_{k+1},\dots,X_{m}).
   \tag{Claim 4.15}
 \]
+Three quantities move together, and it is worth reading $m-k$ as the count it is: binding the first
+$k$ variables to $\boldsymbol\alpha$ leaves $X_{k+1},\dots,X_{m}$ free, so the arity falls from $m$
+to $m-k$, the degree from $2^{m}$ to $2^{m-k}$, and the domain from $\mathcal{L}$ to
+$\mathcal{L}^{(2^{k})}$ of size $|\mathcal{L}|/2^{k}$.
+
+That third movement is the one to watch, because of what it does to the rate:
+\[
+  \rho=\frac{2^{m}}{|\mathcal{L}|}
+  \qquad\longrightarrow\qquad
+  \rho'=\frac{2^{m-k}}{|\mathcal{L}|/2^{k}}=\frac{2^{m}}{|\mathcal{L}|}=\rho .
+\]
+\textbf{Folding alone does not change the rate.} Claim 4.15 is the structural half of the story and
+says nothing about cost. The rate reduction of \S4 comes from somewhere else entirely --- from the
+prover re-committing $g$ on a domain that is merely \emph{halved} rather than divided by $2^{k}$ ---
+which is why that section is about a choice and this one is about an identity.
 
 \section{Rate is the design variable}
 
@@ -275,9 +291,32 @@ $t$ shift queries, and forms the next function as a quotient:
   \mathrm{Quotient}(f,S,\mathrm{Ans},\mathrm{Fill})(x)
   =\frac{f(x)-\widehat{\mathrm{Ans}}(x)}{\hat V_{S}(x)}\qquad (x\notin S).
 \]
-Quotienting by a \emph{wrong} value pushes the result far from low degree (Lemma 4.4). The price is
-that the degree drops by $|\mathcal{G}|$, so the round closes with degree correction --- a geometric
-sum evaluated in $O(\log e)$ operations by repeated squaring.
+Two of those symbols carry the whole mechanism. $S=\{z_{0},z_{1},\dots,z_{t}\}$ is the out-of-domain
+sample together with the shift points; $\widehat{\mathrm{Ans}}$ interpolates the values the verifier
+computed \emph{for itself} at those points; and
+\[
+  \hat V_{S}(X)=\prod_{z\in S}(X-z)
+\]
+is the \emph{vanishing polynomial} of $S$ --- monic, of degree $|S|=t+1$, zero exactly on $S$.
+
+The quotient is a polynomial only when the numerator vanishes wherever the denominator does, so
+\begin{align*}
+  \frac{g-\widehat{\mathrm{Ans}}}{\hat V_{S}}\ \text{is a polynomial}
+  \;&\Longleftrightarrow\;
+  g-\widehat{\mathrm{Ans}}\ \text{vanishes on } S\\
+  \;&\Longleftrightarrow\;
+  g\ \text{carries the verifier's answers at } S.
+\end{align*}
+That equivalence \emph{is} the enforcement. Nobody checks the answers directly; the division either
+comes out clean or it does not, and when it does not the result is not slightly wrong but far from
+low degree (Lemma 4.4) --- so the next round's proximity test, which was running anyway, rejects it.
+A lie is converted into a distance the existing machinery already measures.
+
+Two consequences follow from $\hat V_{S}$ alone. The side condition $x\notin S$ is not fussiness:
+the denominator vanishes there, which is why the new domain must be chosen disjoint from $S$ and why
+$\mathrm{Fill}$ exists to supply values at the holes. And the degree drops by $|S|$, so the round
+closes with degree correction --- a geometric sum evaluated in $O(\log e)$ operations by repeated
+squaring rather than term by term.
 
 \section{A WHIR iteration: constraints instead of quotients}
 
@@ -296,7 +335,7 @@ sum evaluated in $O(\log e)$ operations by repeated squaring.
     + Z\cdot\sum_{i=0}^{t}\gamma^{\,i+1}\cdot\eqp(\boldsymbol z_{i},\boldsymbol X),\\
   \sigma' &:= \hat h_{k}(\alpha_{k}) + \sum_{i=0}^{t}\gamma^{\,i+1}\cdot y_{i}.
 \end{align*}
-The out-of-domain answer and the $t$ shift answers become $t+2$ additional \emph{constraints},
+The out-of-domain answer and the $t$ shift answers become $t+1$ additional \emph{constraints},
 folded into the weight polynomial by powers of $\gamma$. No quotient, hence no degree correction,
 hence --- as the paper states explicitly --- \textbf{the verifier performs no divisions at all}. On
 a machine without \texttt{OP\_DIV}, where an inversion must be hinted and checked, that is the
@@ -927,10 +966,39 @@ permutation regardless of depth:
 \]
 
 \subsection*{Soundness regime}
-\texttt{SecurityAssumption::CapacityBound} is the cheapest of the three by a factor of 3.7 in
-verifier hashes --- here, directly, in script bytes --- and the only one resting on the unproven half
-of Conjecture 4.12. A defensible choice, and the papers' own benchmarking default, but a verifier
-that settles bitcoin should say out loud which assumption it stands on.
+\texttt{SecurityAssumption::CapacityBound} is the cheapest of the three and the only one resting on
+the unproven half of Conjecture 4.12. Nothing in the implementation mentions a soundness assumption:
+the script executes a schedule, and the regime reaches it only as a query count. So the choice is a
+configuration change, and \texttt{whir/tests/budget.rs} prices it --- each regime given the grinding
+it needs, since holding \texttt{pow\_bits} fixed reports \emph{not derivable} for the weaker
+assumptions rather than a price.
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Regime} & $m$ & \texttt{pow} & \textbf{queries} & \textbf{permutations} & \textbf{vs CB}\\
+\midrule
+UD, proved            & 16 & 0  & 110 & 7\,376  & \textbf{7.18$\times$}\\
+JB, Conj.\ 4.12(1)    & 16 & 26 & 39  & 1\,853  & 1.80$\times$\\
+CB, Conj.\ 4.12(2)    & 16 & 19 & 21  & 1\,027  & 1.00$\times$\\
+\midrule
+UD, proved            & 20 & 0  & 110 & 11\,171 & \textbf{9.01$\times$}\\
+JB, Conj.\ 4.12(1)    & 20 & 33 & 35  & 2\,222  & 1.79$\times$\\
+CB, Conj.\ 4.12(2)    & 20 & 28 & 19  & 1\,240  & 1.00$\times$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two things the paper's own comparison does not show at this instance. \textbf{UD wants no grinding at
+all}, paying entirely in queries, and its count is capped at 110 regardless of size --- so the gap
+widens with $m$ rather than staying fixed. And \textbf{JB wants more grinding than CB}, 26 bits
+against 19, which is the direction a weaker assumption should push: less can be assumed, so more has
+to be bought.
+
+A defensible choice, and the papers' own benchmarking default. But the proved alternative costs 7 to
+9 times here, not the 3.7 of WHIR's Table 5 --- that table is Goldilocks with a cubic extension at
+$m=24$ and rate $1/2$, and a ratio does not travel between instances. A verifier that settles bitcoin
+should say out loud which assumption it stands on, and what the proved one would cost \emph{here}.
 
 \clearpage
 \begin{center}{\large\bfseries Part III\quad Completeness and soundness}\end{center}
@@ -1032,8 +1100,9 @@ between \S\ref{sec:eps}'s $\varepsilon$ and this table is exactly that.
 \noindent\fbox{\begin{minipage}{0.96\linewidth}\small
 \textbf{An assumption that must be named.} The query-term errors above are under the capacity bound
 (\texttt{SecurityAssumption::CapacityBound}), which rests on the \emph{unproven} half of
-Conjecture 4.12. Under the proved unique-decoding setting the query count is 3.7$\times$ larger by
-\S\ref{sec:eps}'s table, and script bytes scale with it.
+Conjecture 4.12. Under the proved unique-decoding setting this implementation costs 7 to 9 times as
+much --- measured at \S\ref{sec:levers}, not read off the paper's table, which is a different
+instance --- and script bytes scale with the query count.
 \end{minipage}}
 
 \subsection*{Why D1 was ``soundness error $=1$''}
