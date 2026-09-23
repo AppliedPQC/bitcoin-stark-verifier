@@ -1104,3 +1104,153 @@ fn replay_at(num_vars: usize) {
         runs(&ch.log)
     );
 }
+
+// ---------------------------------------------------------------------------
+// The reference verifier on real proofs.
+// ---------------------------------------------------------------------------
+
+fn opening(o: &p3_whir::pcs::proof::QueryOpenings<F, EF, <MyMmcs as p3_commit::Mmcs<F>>::MultiProof>) -> reference::Opening {
+    use p3_whir::pcs::proof::QueryOpenings;
+    let digests = |sibs: &Vec<[F; 8]>| -> Vec<[u32; 8]> {
+        sibs.iter().map(|d| d.map(|x| x.as_canonical_u32())).collect()
+    };
+    match o {
+        QueryOpenings::Base(s) => reference::Opening {
+            extension: false,
+            rows: s.rows.iter().map(|r| r.iter().map(|x| x.as_canonical_u32()).collect()).collect(),
+            boundaries: digests(&s.proof.sibling_hashes),
+        },
+        QueryOpenings::Extension(s) => reference::Opening {
+            extension: true,
+            rows: s.rows.iter().map(|r| r.iter().flat_map(|&e| ef_coeffs(e)).collect()).collect(),
+            boundaries: digests(&s.proof.sibling_hashes),
+        },
+    }
+}
+
+/// The verifier's inputs for a single-table protocol.
+fn verify_inputs(
+    pcs: &LogPcs<PrefixProver<F, EF>>,
+    ds: &DomainSeparator<EF, F>,
+    protocol: &OpeningProtocol,
+    commitment: &Commit,
+    proof: &Proof,
+) -> (reference::VerifyConfig, reference::VerifyData) {
+    let (transcript_cfg, transcript_data) = transcript_inputs(pcs, ds, commitment, proof);
+    let c = &pcs.config;
+
+    // `plan_layout` for one table: `k = log2_ceil(width * 2^arity)`, and
+    // column `col` gets selector index `col` over `k - arity` variables.
+    // `PrefixProver` then bit-reverses the index, so the coordinates read the
+    // column's bits least significant first.
+    let shapes = protocol.table_shapes();
+    assert_eq!(shapes.len(), 1, "the reference builds the layout of one table");
+    let (arity, width) = (shapes[0].num_variables(), shapes[0].width());
+    let k = (width << arity).next_power_of_two().trailing_zeros() as usize;
+    assert_eq!(k, c.num_variables);
+    let sel_vars = k - arity;
+    let claims = protocol
+        .iter_openings()
+        .map(|(_, batch)| {
+            assert!(batch.next().is_empty(), "next openings are not modelled");
+            reference::ClaimShape {
+                row_vars: arity,
+                selectors: batch
+                    .current()
+                    .iter()
+                    .map(|&col| {
+                        (0..sel_vars).map(|i| [((col >> i) & 1) as u32, 0, 0, 0]).collect()
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    let cfg = reference::VerifyConfig {
+        transcript: transcript_cfg,
+        num_variables: k,
+        claims,
+        rounds: c
+            .round_parameters
+            .iter()
+            .map(|r| reference::RoundMath {
+                num_variables: r.num_variables,
+                folded_domain_gen: r.folded_domain_gen.as_canonical_u32(),
+            })
+            .collect(),
+        final_folded_domain_gen: c.final_round_config().folded_domain_gen.as_canonical_u32(),
+    };
+    let data = reference::VerifyData {
+        transcript: transcript_data,
+        round_openings: proof.whir.rounds.iter().map(|r| opening(&r.openings)).collect(),
+        final_opening: opening(&proof.whir.final_openings),
+    };
+    (cfg, data)
+}
+
+/// Plonky3's proof, accepted by the reference verifier's arithmetic, and
+/// rejected once any prover message it relies on is touched.
+#[test]
+fn plonky3_proof_verifies_in_the_reference_verifier() {
+    for num_vars in [6usize, 8] {
+        NUM_VARS.with(|v| *v.borrow_mut() = num_vars);
+        let (commitment, proof, num_variables, protocol) = prove_full();
+        let perm = default_koalabear_poseidon2_16();
+        let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
+        let config =
+            WhirConfig::<EF, F, Logger>::new(num_variables, params(num_variables)).expect("config");
+        let pcs = LogPcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
+        let mut ds = DomainSeparator::new(vec![]);
+        pcs.add_domain_separator::<8>(&mut ds);
+
+        let (cfg, data) = verify_inputs(&pcs, &ds, &protocol, &commitment, &proof);
+        let ok = reference::verify(&cfg, &data).unwrap_or_else(|e| panic!("{num_vars} vars: {e:?}"));
+        eprintln!(
+            "{num_vars} vars: accepted; claim {:?}, weights {:?}, final value {:?}",
+            ok.claimed, ok.weights, ok.final_value
+        );
+
+        // Every prover message is absorbed, so touching one moves the query
+        // indices and the proof's openings no longer sit where the transcript
+        // looks: the Merkle check is the first to fail.
+        for (what, bad) in [
+            ("final polynomial", {
+                let mut d = data.clone();
+                d.transcript.final_poly[0][0] ^= 1;
+                d
+            }),
+            ("sumcheck message", {
+                let mut d = data.clone();
+                d.transcript.initial_sumcheck[0].poly[0][0] ^= 1;
+                d
+            }),
+            ("opened row", {
+                let mut d = data.clone();
+                d.final_opening.rows[0][0] ^= 1;
+                d
+            }),
+        ] {
+            let err = reference::verify(&cfg, &bad).expect_err(what);
+            assert!(
+                matches!(err, reference::VerifyError::Merkle { .. } | reference::VerifyError::Opening { .. }),
+                "{num_vars} vars: a changed {what} must fail at the openings, got {err:?}"
+            );
+        }
+
+        // Only the arithmetic sees a wrong parameter. The final domain's
+        // generator moves the STIR points off the folds; a selector coordinate
+        // moves an initial claim point, which the closing identity catches.
+        let mut wrong = cfg.clone();
+        wrong.final_folded_domain_gen ^= 1;
+        assert!(
+            matches!(reference::verify(&wrong, &data), Err(reference::VerifyError::FinalStir { .. })),
+            "{num_vars} vars: a wrong final generator must fail the STIR check"
+        );
+        let mut wrong = cfg.clone();
+        wrong.claims[0].selectors[0][0] = [1, 0, 0, 0];
+        assert!(
+            matches!(reference::verify(&wrong, &data), Err(reference::VerifyError::Closing { .. })),
+            "{num_vars} vars: a wrong claim point must fail the closing identity"
+        );
+    }
+}

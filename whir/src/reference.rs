@@ -632,3 +632,364 @@ pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &
         pow_ok,
     }
 }
+
+// ---------------------------------------------------------------------------
+// The WHIR verifier's arithmetic, on top of the transcript.
+//
+// `WhirVerifier::verify` and the PCS adapter around it, in plain Rust over the
+// crate's `u32`/`[u32; 4]` arithmetic. The transcript is run first
+// ([`transcript`]); the arithmetic only consumes challenges, never feeds the
+// sponge, so the two passes are independent.
+//
+//   1. Initial constraint. One `Eq` statement per opening claim: each current
+//      opening's point is the claim's row point `expand(y, row_vars)` with its
+//      column selector's coordinates appended (`PrefixProver` reverses the
+//      selectors and lifts them as a suffix). Then one `Eq` statement of
+//      the commitment's OOD claims at `expand(y, k)`. Batched by `alpha`:
+//      `claim = sum_i alpha^i eval_i` in that order.
+//   2. Initial sumcheck: `claim = h(r)` per round.
+//   3. Per intermediate round: the previous commitment is opened at the
+//      round's queries (Merkle paths from the pruned multi-proof), each row
+//      folds to `eval_multilinear(row, previous folding randomness)`, the query
+//      index `q` becomes the point `z = g^q`; a new constraint
+//      `[Eq(ood), Select(z, folds)]` with challenge `gamma` is combined into
+//      the claim, then the round's sumcheck runs.
+//   4. Final: the last commitment's rows fold likewise and must equal the
+//      final polynomial's Horner evaluation at `z`; the final sumcheck runs;
+//      with `R` the concatenation of all folding randomness, the weights
+//      `w(R) = sum_c sum_i chi_c^i weight_{c,i}(last arity_c coords of R)`
+//      and the closing identity `claim == w(R) * eval_multilinear(final, r_fin)`.
+//
+// `Eq` weights are `eq(point, .)`; `Select` weights are Plonky3's
+// `eval_select`, the multilinear extension of `b -> z^b`.
+// ---------------------------------------------------------------------------
+
+use crate::pruned::{self, Digest};
+
+/// A claim's shape: the row point's arity and, per current opening, the
+/// column selector's hypercube coordinates that prefix it.
+#[derive(Clone, Debug)]
+pub struct ClaimShape {
+    pub row_vars: usize,
+    pub selectors: Vec<Vec<[u32; 4]>>,
+}
+
+/// One intermediate round's arithmetic parameters.
+#[derive(Clone, Debug)]
+pub struct RoundMath {
+    /// Variables of the folded polynomial this round commits to.
+    pub num_variables: usize,
+    /// Generator of the folded domain the queries index.
+    pub folded_domain_gen: u32,
+}
+
+/// Everything the verifier's arithmetic needs beyond the transcript's config.
+#[derive(Clone, Debug)]
+pub struct VerifyConfig {
+    pub transcript: TranscriptConfig,
+    /// Variables of the committed (stacked) polynomial.
+    pub num_variables: usize,
+    pub claims: Vec<ClaimShape>,
+    pub rounds: Vec<RoundMath>,
+    pub final_folded_domain_gen: u32,
+}
+
+/// A commitment opened at the transcript's queries.
+#[derive(Clone, Debug)]
+pub struct Opening {
+    /// Rows hold extension elements, four base coefficients each.
+    pub extension: bool,
+    /// Per query in ascending index order, the row as the base elements the
+    /// leaf hash absorbs.
+    pub rows: Vec<Vec<u32>>,
+    /// The pruned multi-proof's boundary digests.
+    pub boundaries: Vec<Digest>,
+}
+
+/// The proof's prover messages, transcript data included.
+#[derive(Clone, Debug)]
+pub struct VerifyData {
+    pub transcript: TranscriptData,
+    /// Per intermediate round, the *previous* commitment's opening.
+    pub round_openings: Vec<Opening>,
+    pub final_opening: Opening,
+}
+
+/// Why a proof was rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyError {
+    Pow,
+    /// A query's Merkle path did not reach the root. `round` counts the final
+    /// opening as one past the last intermediate round.
+    Merkle { round: usize, query: usize },
+    /// Query count or pruned proof shape did not match the transcript.
+    Opening { round: usize },
+    /// A final query's fold disagreed with the final polynomial.
+    FinalStir { query: usize },
+    Closing { claimed: [u32; 4], expected: [u32; 4] },
+}
+
+/// What an accepted proof pinned down, for tests that check the parts.
+#[derive(Clone, Debug)]
+pub struct Verified {
+    pub challenges: Challenges,
+    /// The claim after every combination and sumcheck round.
+    pub claimed: [u32; 4],
+    pub weights: [u32; 4],
+    pub final_value: [u32; 4],
+}
+
+/// One statement's contribution to the weights: its points and how they weigh.
+#[derive(Clone, Debug)]
+enum Statement {
+    Eq(Vec<Vec<[u32; 4]>>),
+    Select(Vec<u32>),
+}
+
+/// A batched constraint: its challenge, arity and statements in power order.
+#[derive(Clone, Debug)]
+struct Constraint {
+    challenge: [u32; 4],
+    num_variables: usize,
+    statements: Vec<Statement>,
+}
+
+fn lift(x: u32) -> [u32; 4] {
+    [x, 0, 0, 0]
+}
+
+/// `x^e` over the base field.
+pub fn base_pow(x: u32, e: u64) -> u32 {
+    let (mut acc, mut base, mut e) = (1u32, x, e);
+    while e > 0 {
+        if e & 1 == 1 {
+            acc = f::mul(acc, base);
+        }
+        base = f::mul(base, base);
+        e >>= 1;
+    }
+    acc
+}
+
+/// Plonky3's `eval_select(var, point)`: the multilinear extension of
+/// `b -> var^b`, read highest coordinate first with `var` squared per step.
+pub fn select_eval(var: u32, point: &[[u32; 4]]) -> [u32; 4] {
+    use poseidon2::reference::ext4;
+    let mut var = var;
+    let mut acc = EF_ONE;
+    for &r in point.iter().rev() {
+        let term = ext4::add(ext4::mul(r, lift(f::sub(var, 1))), EF_ONE);
+        acc = ext4::mul(acc, term);
+        var = f::mul(var, var);
+    }
+    acc
+}
+
+/// `sum_j p_j var^j` with a base-field `var`.
+pub fn horner(coeffs: &[[u32; 4]], var: u32) -> [u32; 4] {
+    use poseidon2::reference::ext4;
+    let var = lift(var);
+    coeffs.iter().rev().fold([0u32; 4], |acc, &c| ext4::add(ext4::mul(acc, var), c))
+}
+
+/// `sum_i chi^(shift + i) e_i`, added into `claim`.
+fn combine_into(claim: &mut [u32; 4], chi: [u32; 4], shift: usize, evals: &[[u32; 4]]) {
+    use poseidon2::reference::ext4;
+    let mut power = EF_ONE;
+    for _ in 0..shift {
+        power = ext4::mul(power, chi);
+    }
+    for &e in evals {
+        *claim = ext4::add(*claim, ext4::mul(power, e));
+        power = ext4::mul(power, chi);
+    }
+}
+
+/// The rows of an opening as extension elements, for folding.
+fn rows_as_ef(opening: &Opening) -> Vec<Vec<[u32; 4]>> {
+    opening
+        .rows
+        .iter()
+        .map(|row| {
+            if opening.extension {
+                row.chunks(4).map(|c| [c[0], c[1], c[2], c[3]]).collect()
+            } else {
+                row.iter().map(|&x| lift(x)).collect()
+            }
+        })
+        .collect()
+}
+
+/// Every query's Merkle path of `opening` must reach `root`.
+fn check_opening(
+    opening: &Opening,
+    root: &[u32],
+    indices: &[u32],
+    depth: usize,
+    round: usize,
+) -> Result<(), VerifyError> {
+    if opening.rows.len() != indices.len() || root.len() != 8 {
+        return Err(VerifyError::Opening { round });
+    }
+    let root: Digest = root.try_into().expect("checked above");
+    let leaves: Vec<Digest> = opening.rows.iter().map(|r| poseidon2::reference::hash_row(r)).collect();
+    let indices: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
+    let paths = pruned::expand(&opening.boundaries, &indices, &leaves, depth)
+        .map_err(|_| VerifyError::Opening { round })?;
+    for (query, path) in paths.iter().enumerate() {
+        let bits: Vec<bool> = (0..depth).map(|i| (path.index >> i) & 1 == 1).collect();
+        if poseidon2::reference::merkle_root(path.leaf, &path.siblings, &bits) != root {
+            return Err(VerifyError::Merkle { round, query });
+        }
+    }
+    Ok(())
+}
+
+/// Fold each opened row at the folding randomness, and the query points.
+fn folds_and_points(
+    opening: &Opening,
+    folding_randomness: &[[u32; 4]],
+    queries: &[u32],
+    gen: u32,
+) -> (Vec<[u32; 4]>, Vec<u32>) {
+    let folds = rows_as_ef(opening)
+        .iter()
+        .map(|row| eval_multilinear(row, folding_randomness))
+        .collect();
+    let points = queries.iter().map(|&q| base_pow(gen, u64::from(q))).collect();
+    (folds, points)
+}
+
+/// The batched weights at `randomness`: `eval_constraints_poly`, prefix order.
+fn weights(constraints: &[Constraint], randomness: &[[u32; 4]]) -> [u32; 4] {
+    use poseidon2::reference::ext4;
+    let mut total = [0u32; 4];
+    for c in constraints {
+        assert!(c.num_variables <= randomness.len());
+        let local = &randomness[randomness.len() - c.num_variables..];
+        let mut shift = 0;
+        for s in &c.statements {
+            let ws: Vec<[u32; 4]> = match s {
+                Statement::Eq(points) => points.iter().map(|p| eq_eval(p, local)).collect(),
+                Statement::Select(vars) => vars.iter().map(|&v| select_eval(v, local)).collect(),
+            };
+            let mut acc = [0u32; 4];
+            combine_into(&mut acc, c.challenge, shift, &ws);
+            total = ext4::add(total, acc);
+            shift += ws.len();
+        }
+    }
+    total
+}
+
+/// Run the verifier: the transcript, then the arithmetic.
+pub fn verify(cfg: &VerifyConfig, data: &VerifyData) -> Result<Verified, VerifyError> {
+    let t = &cfg.transcript;
+    let ch = transcript(t, &data.transcript, &mut Challenger::new());
+    if !ch.pow_ok {
+        return Err(VerifyError::Pow);
+    }
+
+    // 1. The initial constraint and claim.
+    let mut statements = Vec::new();
+    let mut evals = Vec::new();
+    assert_eq!(cfg.claims.len(), data.transcript.openings.len(), "claim count");
+    for ((shape, point), opening_evals) in
+        cfg.claims.iter().zip(&ch.opening_points).zip(&data.transcript.openings)
+    {
+        assert_eq!(shape.selectors.len(), opening_evals.len(), "openings per claim");
+        let row = expand_univariate(*point, shape.row_vars);
+        // `PrefixProver` reverses its selectors and lifts them as a *suffix*
+        // (`LayoutStrategy::new(true, Prefix)`): the row point comes first.
+        let points = shape
+            .selectors
+            .iter()
+            .map(|sel| row.iter().copied().chain(sel.iter().copied()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        for p in &points {
+            assert_eq!(p.len(), cfg.num_variables, "lifted claim point arity");
+        }
+        statements.push(Statement::Eq(points));
+        evals.push(opening_evals.clone());
+    }
+    let ood_points: Vec<Vec<[u32; 4]>> = ch
+        .initial_ood_points
+        .iter()
+        .map(|&y| expand_univariate(y, cfg.num_variables))
+        .collect();
+    if !ood_points.is_empty() {
+        statements.push(Statement::Eq(ood_points));
+        evals.push(data.transcript.initial_ood_answers.clone());
+    }
+    let mut claimed = [0u32; 4];
+    let mut shift = 0;
+    for group in &evals {
+        combine_into(&mut claimed, ch.alpha, shift, group);
+        shift += group.len();
+    }
+    let mut constraints = vec![Constraint {
+        challenge: ch.alpha,
+        num_variables: cfg.num_variables,
+        statements,
+    }];
+
+    // 2. The initial sumcheck.
+    for (round, &r) in data.transcript.initial_sumcheck.iter().zip(&ch.initial_folding) {
+        claimed = sumcheck_round(claimed, round.poly[0], round.poly[1], r);
+    }
+    let mut randomness: Vec<[u32; 4]> = ch.initial_folding.clone();
+    let mut prev_root: &[u32] = &data.transcript.root;
+    let mut prev_folding: Vec<[u32; 4]> = ch.initial_folding.clone();
+
+    // 3. Intermediate rounds.
+    assert_eq!(cfg.rounds.len(), t.rounds.len());
+    assert_eq!(data.round_openings.len(), t.rounds.len());
+    for (i, ((rm, rt), rc)) in cfg.rounds.iter().zip(&t.rounds).zip(&ch.rounds).enumerate() {
+        let opening = &data.round_openings[i];
+        check_opening(opening, prev_root, &rc.queries, rt.domain_bits, i)?;
+        let (folds, points) =
+            folds_and_points(opening, &prev_folding, &rc.queries, rm.folded_domain_gen);
+        let ood: Vec<Vec<[u32; 4]>> =
+            rc.ood_points.iter().map(|&y| expand_univariate(y, rm.num_variables)).collect();
+        let rd = &data.transcript.rounds[i];
+        combine_into(&mut claimed, rc.combination, 0, &rd.ood_answers);
+        combine_into(&mut claimed, rc.combination, rd.ood_answers.len(), &folds);
+        constraints.push(Constraint {
+            challenge: rc.combination,
+            num_variables: rm.num_variables,
+            statements: vec![Statement::Eq(ood), Statement::Select(points)],
+        });
+        for (round, &r) in rd.sumcheck.iter().zip(&rc.folding) {
+            claimed = sumcheck_round(claimed, round.poly[0], round.poly[1], r);
+        }
+        randomness.extend_from_slice(&rc.folding);
+        prev_root = &rd.root;
+        prev_folding = rc.folding.clone();
+    }
+
+    // 4. The final polynomial, queries, sumcheck and closing identity.
+    let final_round = t.rounds.len();
+    check_opening(&data.final_opening, prev_root, &ch.final_queries, t.final_domain_bits, final_round)?;
+    let (folds, points) = folds_and_points(
+        &data.final_opening,
+        &prev_folding,
+        &ch.final_queries,
+        cfg.final_folded_domain_gen,
+    );
+    for (query, (&fold, &z)) in folds.iter().zip(&points).enumerate() {
+        if horner(&data.transcript.final_poly, z) != fold {
+            return Err(VerifyError::FinalStir { query });
+        }
+    }
+    for (round, &r) in data.transcript.final_sumcheck.iter().zip(&ch.final_folding) {
+        claimed = sumcheck_round(claimed, round.poly[0], round.poly[1], r);
+    }
+    randomness.extend_from_slice(&ch.final_folding);
+    let weights = weights(&constraints, &randomness);
+    let final_value = eval_multilinear(&data.transcript.final_poly, &ch.final_folding);
+    let expected = poseidon2::reference::ext4::mul(weights, final_value);
+    if claimed != expected {
+        return Err(VerifyError::Closing { claimed, expected });
+    }
+    Ok(Verified { challenges: ch, claimed, weights, final_value })
+}
