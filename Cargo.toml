@@ -7,7 +7,7 @@
 # sibling crates as it is written.
 [workspace]
 resolver = "2"
-members = ["poseidon2", "whir"]
+members = ["poseidon2", "whir", "whir-gc"]
 
 [workspace.package]
 version = "0.1.0"
@@ -32,6 +32,15 @@ p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3" }
 p3-dft = { git = "https://github.com/Plonky3/Plonky3" }
 p3-matrix = { git = "https://github.com/Plonky3/Plonky3" }
 p3-multilinear-util = { git = "https://github.com/Plonky3/Plonky3" }
+# The binary tower fields and WHIR over their additive domain, for the garbled
+# verifier in `whir-gc`.
+p3-binary-field = { git = "https://github.com/Plonky3/Plonky3" }
+p3-binary-pcs = { git = "https://github.com/Plonky3/Plonky3" }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3" }
+# GOAT's garbler and circuit API (BitVM's `garbled-snark-verifier`, modified).
+# `_blake3` makes Blake3 the garbling PRF; with no feature the crate's `hash`
+# returns zeros, and AES is not an option here.
+garbled-snark-verifier = { git = "https://github.com/GOATNetwork/bitvm-gc", rev = "da8c5bd", features = ["_blake3"] }
 rand = "0.9.1"
 rand_chacha = "0.9.0"
 # Plonky3 pins rand 0.10, which has a different rand_core than the 0.9 the rest

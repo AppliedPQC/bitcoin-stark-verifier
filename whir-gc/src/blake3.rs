@@ -1,0 +1,423 @@
+//! Blake3 as gates: the hasher of GOAT's `bitvm-gc`
+//! (`garbled-snark-verifier/src/circuits/sect233k1/blake3_ckt.rs`, MIT OR
+//! Apache-2.0, itself a transcription of the BLAKE3 reference implementation),
+//! vendored because it is `pub(crate)` there. Single-chunk inputs only, which
+//! covers a Merkle compression (64 bytes) and a leaf row (256 bytes).
+//!
+//! Wire layout: a byte is eight wires, bit 0 first (`U8`), matching the
+//! little-endian bit order `str_to_bits_le` in the original tests uses.
+
+use core::cmp::min;
+
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
+
+const OUT_LEN: usize = 32;
+const BLOCK_LEN: usize = 64;
+const CHUNK_LEN: usize = 1024;
+
+const CHUNK_START: u32 = 1 << 0;
+const CHUNK_END: u32 = 1 << 1;
+const ROOT: u32 = 1 << 3;
+
+pub type U32 = [usize; 32];
+pub type U8 = [usize; 8];
+
+fn const_u32_to_bits_le<T: CircuitTrait>(bld: &mut T, n: u32) -> U32 {
+    let vs: Vec<bool> = (0..32).map(|i| (n >> i) & 1 != 0).collect();
+    let vs: Vec<usize> = vs.iter().map(|v| bool_const_to_wire_label(bld, *v)).collect();
+    vs.try_into().unwrap()
+}
+
+fn bool_const_to_wire_label<T: CircuitTrait>(bld: &mut T, v: bool) -> usize {
+    if !v { bld.zero() } else { bld.one() }
+}
+
+fn get_iv<T: CircuitTrait>(bld: &mut T) -> [U32; 8] {
+    let iv2: [U32; 8] = [
+        const_u32_to_bits_le(bld, 0x6A09E667),
+        const_u32_to_bits_le(bld, 0xBB67AE85),
+        const_u32_to_bits_le(bld, 0x3C6EF372),
+        const_u32_to_bits_le(bld, 0xA54FF53A),
+        const_u32_to_bits_le(bld, 0x510E527F),
+        const_u32_to_bits_le(bld, 0x9B05688C),
+        const_u32_to_bits_le(bld, 0x1F83D9AB),
+        const_u32_to_bits_le(bld, 0x5BE0CD19),
+    ];
+    iv2
+}
+
+const MSG_PERMUTATION: [u8; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+/// `a + b mod 2^32` at one AND gate per bit.
+///
+/// The original computed the carry as `(a·b) ⊕ (p·c)`, two ANDs per bit. Under
+/// free-XOR the majority function is one: `maj(a, b, c) = c ⊕ ((a⊕c)·(b⊕c))`.
+/// The carry out of bit 31 is discarded, so it is not computed.
+fn wrapping_add_u32<T: CircuitTrait>(bld: &mut T, a: U32, b: U32) -> U32 {
+    let mut result = [0; 32];
+    let mut carry = bld.zero();
+
+    for i in 0..32 {
+        let p = bld.xor_wire(a[i], b[i]);
+        result[i] = bld.xor_wire(p, carry);
+        if i < 31 {
+            let ac = bld.xor_wire(a[i], carry);
+            let bc = bld.xor_wire(b[i], carry);
+            let t = bld.and_wire(ac, bc);
+            carry = bld.xor_wire(carry, t);
+        }
+    }
+
+    result
+}
+
+fn xor_u32<T: CircuitTrait>(bld: &mut T, a: U32, b: U32) -> U32 {
+    let c: Vec<usize> = (0..32).map(|i| bld.xor_wire(a[i], b[i])).collect();
+    c.try_into().unwrap()
+}
+
+fn and_u32<T: CircuitTrait>(bld: &mut T, a: U32, b: U32) -> U32 {
+    let c: Vec<usize> = (0..32).map(|i| bld.and_wire(a[i], b[i])).collect();
+    c.try_into().unwrap()
+}
+
+fn or_u32<T: CircuitTrait>(bld: &mut T, x: U32, y: U32) -> U32 {
+    let xpy = xor_u32(bld, x, y);
+    let xmy = and_u32(bld, x, y);
+
+    xor_u32(bld, xpy, xmy)
+}
+
+fn rotate_right_u32(value: U32, n: u32) -> U32 {
+    let mut result = [0; 32];
+    let shift = (n % 32) as usize;
+
+    for (i, result_i) in result.iter_mut().enumerate() {
+        // Compute the new position using modular arithmetic
+        let from_index = (i + shift) % 32;
+        *result_i = value[from_index];
+    }
+
+    result
+}
+
+// The mixing function, G, which mixes either a column or a diagonal.
+#[allow(clippy::too_many_arguments)]
+fn g<T: CircuitTrait>(
+    bld: &mut T,
+    state: &mut [U32; 16],
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    mx: U32,
+    my: U32,
+) {
+    let tmp0 = wrapping_add_u32(bld, state[a], state[b]);
+    state[a] = wrapping_add_u32(bld, tmp0, mx);
+    state[d] = rotate_right_u32(xor_u32(bld, state[d], state[a]), 16);
+    state[c] = wrapping_add_u32(bld, state[c], state[d]);
+    state[b] = rotate_right_u32(xor_u32(bld, state[b], state[c]), 12);
+
+    let tmp0 = wrapping_add_u32(bld, state[a], state[b]);
+    state[a] = wrapping_add_u32(bld, tmp0, my);
+    state[d] = rotate_right_u32(xor_u32(bld, state[d], state[a]), 8);
+    state[c] = wrapping_add_u32(bld, state[c], state[d]);
+    state[b] = rotate_right_u32(xor_u32(bld, state[b], state[c]), 7);
+}
+
+fn round<T: CircuitTrait>(bld: &mut T, state: &mut [U32; 16], m: &[U32; 16]) {
+    // Mix the columns.
+    g(bld, state, 0, 4, 8, 12, m[0], m[1]);
+    g(bld, state, 1, 5, 9, 13, m[2], m[3]);
+    g(bld, state, 2, 6, 10, 14, m[4], m[5]);
+    g(bld, state, 3, 7, 11, 15, m[6], m[7]);
+    // Mix the diagonals.
+    g(bld, state, 0, 5, 10, 15, m[8], m[9]);
+    g(bld, state, 1, 6, 11, 12, m[10], m[11]);
+    g(bld, state, 2, 7, 8, 13, m[12], m[13]);
+    g(bld, state, 3, 4, 9, 14, m[14], m[15]);
+}
+
+fn permute(m: &mut [U32; 16]) {
+    let mut permuted = [[0; 32]; 16];
+    for i in 0..16 {
+        permuted[i] = m[MSG_PERMUTATION[i] as usize];
+    }
+    *m = permuted;
+}
+
+fn compress<T: CircuitTrait>(
+    bld: &mut T,
+    chaining_value: &[U32; 8],
+    block_words: &[U32; 16],
+    counter: u64,
+    block_len: U32,
+    flags: U32,
+) -> [U32; 16] {
+    let counter_low = const_u32_to_bits_le(bld, counter as u32);
+    let counter_high = const_u32_to_bits_le(bld, (counter >> 32) as u32);
+    #[rustfmt::skip]
+    let iv: [U32; 8] = get_iv(bld);
+    let mut state = [
+        chaining_value[0],
+        chaining_value[1],
+        chaining_value[2],
+        chaining_value[3],
+        chaining_value[4],
+        chaining_value[5],
+        chaining_value[6],
+        chaining_value[7],
+        iv[0],
+        iv[1],
+        iv[2],
+        iv[3],
+        counter_low,
+        counter_high,
+        block_len,
+        flags,
+    ];
+
+    let mut block = *block_words;
+
+    round(bld, &mut state, &block); // round 1
+    permute(&mut block);
+    round(bld, &mut state, &block); // round 2
+    permute(&mut block);
+    round(bld, &mut state, &block); // round 3
+    permute(&mut block);
+    round(bld, &mut state, &block); // round 4
+    permute(&mut block);
+    round(bld, &mut state, &block); // round 5
+    permute(&mut block);
+    round(bld, &mut state, &block); // round 6
+    permute(&mut block);
+    round(bld, &mut state, &block); // round 7
+
+    for i in 0..8 {
+        state[i] = xor_u32(bld, state[i], state[i + 8]);
+        state[i + 8] = xor_u32(bld, state[i + 8], chaining_value[i]);
+    }
+    state
+}
+
+fn first_8_words(compression_output: [U32; 16]) -> [U32; 8] {
+    compression_output[0..8].try_into().unwrap()
+}
+
+fn words_from_little_endian_bytes(bytes: &[U8], words: &mut [U32]) {
+    debug_assert_eq!(bytes.len(), 4 * words.len());
+    for (four_bytes, word) in bytes.chunks_exact(4).zip(words) {
+        let app_four_bytes: U32 = four_bytes.concat().try_into().unwrap();
+        *word = app_four_bytes;
+    }
+}
+
+struct Output {
+    input_chaining_value: [U32; 8],
+    block_words: [U32; 16],
+    block_len: U32,
+    flags: U32,
+}
+
+impl Output {
+    fn root_output_bytes<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
+        let root = const_u32_to_bits_le(bld, ROOT);
+        for (output_block_counter, out_block) in out_slice.chunks_mut(2 * OUT_LEN).enumerate() {
+            let flags = or_u32(bld, self.flags, root);
+            let words = compress(
+                bld,
+                &self.input_chaining_value,
+                &self.block_words,
+                output_block_counter as u64,
+                self.block_len,
+                flags,
+            );
+            for (word_bits, out_word_bits) in words.iter().zip(out_block.chunks_mut(4)) {
+                for (i, byte_bits) in out_word_bits.iter_mut().enumerate() {
+                    let arr: U8 = word_bits[8 * i..(i + 1) * 8].try_into().unwrap();
+                    *byte_bits = arr;
+                }
+            }
+        }
+    }
+}
+
+struct ChunkState {
+    chaining_value: [U32; 8],
+    chunk_counter: u64,
+    block: [U8; BLOCK_LEN],
+    block_len: u8,
+    blocks_compressed: u8,
+    flags: U32,
+}
+
+impl ChunkState {
+    fn new<T: CircuitTrait>(
+        bld: &mut T,
+        key_words: [U32; 8],
+        chunk_counter: u64,
+        flags: U32,
+    ) -> Self {
+        let zero_gate = bld.zero();
+        Self {
+            chaining_value: key_words,
+            chunk_counter,
+            block: [[zero_gate; 8]; BLOCK_LEN],
+            block_len: 0,
+            blocks_compressed: 0,
+            flags,
+        }
+    }
+
+    fn len(&self) -> usize {
+        BLOCK_LEN * self.blocks_compressed as usize + self.block_len as usize
+    }
+
+    fn start_flag<T: CircuitTrait>(&self, bld: &mut T) -> U32 {
+        let r = if self.blocks_compressed == 0 { CHUNK_START } else { 0 };
+        const_u32_to_bits_le(bld, r)
+    }
+
+    fn update<T: CircuitTrait>(&mut self, bld: &mut T, mut input: &[U8]) {
+        let zero_gate = bld.zero();
+        let block_len = const_u32_to_bits_le(bld, BLOCK_LEN as u32);
+        while !input.is_empty() {
+            // If the block buffer is full, compress it and clear it. More
+            // input is coming, so this compression is not CHUNK_END.
+            if self.block_len as usize == BLOCK_LEN {
+                let mut block_words = [[zero_gate; 32]; 16];
+                words_from_little_endian_bytes(&self.block, &mut block_words);
+                let start_flag = self.start_flag(bld);
+                let flags = or_u32(bld, self.flags, start_flag);
+                let cmp = compress(
+                    bld,
+                    &self.chaining_value,
+                    &block_words,
+                    self.chunk_counter,
+                    block_len,
+                    flags,
+                );
+                self.chaining_value = first_8_words(cmp);
+                self.blocks_compressed += 1;
+                self.block = [[zero_gate; 8]; BLOCK_LEN];
+                self.block_len = 0;
+            }
+
+            // Copy input bytes into the block buffer.
+            let want = BLOCK_LEN - self.block_len as usize;
+            let take = min(want, input.len());
+            self.block[self.block_len as usize..][..take].copy_from_slice(&input[..take]);
+            self.block_len += take as u8;
+            input = &input[take..];
+        }
+    }
+
+    fn output<T: CircuitTrait>(&self, bld: &mut T) -> Output {
+        let zero_gate = bld.zero();
+        let mut block_words = [[zero_gate; 32]; 16];
+        words_from_little_endian_bytes(&self.block, &mut block_words);
+        let start_flag = self.start_flag(bld);
+        let flags = or_u32(bld, self.flags, start_flag);
+        let chunk_end = const_u32_to_bits_le(bld, CHUNK_END);
+        let flags = or_u32(bld, flags, chunk_end);
+
+        Output {
+            input_chaining_value: self.chaining_value,
+            block_words,
+            block_len: const_u32_to_bits_le(bld, self.block_len as u32),
+            flags,
+        }
+    }
+}
+
+/// An incremental hasher that can accept any number of writes.
+pub struct Hasher {
+    chunk_state: ChunkState,
+}
+
+impl Hasher {
+    fn new_internal<T: CircuitTrait>(bld: &mut T, key_words: [U32; 8], flags: U32) -> Self {
+        Self { chunk_state: ChunkState::new(bld, key_words, 0, flags) }
+    }
+
+    /// Construct a new `Hasher` for the regular hash function.
+    pub fn new<T: CircuitTrait>(bld: &mut T) -> Self {
+        let zero_gate = bld.zero();
+        let iv = get_iv(bld);
+        let zero = [zero_gate; 32];
+        Self::new_internal(bld, iv, zero)
+    }
+
+    /// Add input to the hash state. This can be called any number of times.
+    pub fn update<T: CircuitTrait>(&mut self, bld: &mut T, mut input: &[U8]) {
+        while !input.is_empty() {
+            // Compress input bytes into the current chunk state.
+            let want = CHUNK_LEN - self.chunk_state.len();
+            let take = min(want, input.len());
+            self.chunk_state.update(bld, &input[..take]);
+            input = &input[take..];
+        }
+    }
+
+    /// Finalize the hash and write any number of output bytes.
+    pub fn finalize<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
+        let output = self.chunk_state.output(bld);
+        output.root_output_bytes(bld, out_slice);
+    }
+}
+
+pub fn hash<T: CircuitTrait>(bld: &mut T, input_bits: Vec<U8>) -> [U8; 32] {
+    let mut hasher = Hasher::new(bld);
+    hasher.update(bld, &input_bits);
+
+    let mut hash = [[0; 8]; 32];
+    hasher.finalize(bld, &mut hash);
+    hash
+}
+
+
+/// `blake3(input)` for an input of `n` bytes: `n` fresh byte inputs in, 32 bytes out.
+pub fn hash_bytes<T: CircuitTrait>(bld: &mut T, input: &[U8]) -> [U8; 32] {
+    let mut hasher = Hasher::new(bld);
+    hasher.update(bld, input);
+    let mut out = [[0usize; 8]; 32];
+    hasher.finalize(bld, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use garbled_snark_verifier::circuits::sect233k1::builder::CircuitAdapter;
+    use rand::{Rng, SeedableRng};
+    use rand_chacha::ChaCha20Rng;
+
+    fn bits_le(bytes: &[u8]) -> Vec<bool> {
+        bytes.iter().flat_map(|b| (0..8).map(move |i| (b >> i) & 1 == 1)).collect()
+    }
+
+    fn read_bytes(wires: &[bool], out: &[U8]) -> Vec<u8> {
+        out.iter().map(|w| (0..8).fold(0u8, |acc, i| acc | (u8::from(wires[w[i]]) << i))).collect()
+    }
+
+    /// The gadget against the `blake3` crate, and its AND count, at the two
+    /// lengths a Merkle verifier hashes.
+    #[test]
+    fn matches_blake3_and_counts_gates() {
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        for n in [64usize, 256] {
+            let msg: Vec<u8> = (0..n).map(|_| rng.random()).collect();
+            let mut bld = CircuitAdapter::default();
+            let input: Vec<U8> = (0..n).map(|_| bld.fresh::<8>()).collect();
+            let out = hash_bytes(&mut bld, &input);
+            let counts = bld.gate_counts();
+            let wires = bld.eval_gates(&bits_le(&msg));
+            assert_eq!(read_bytes(&wires, &out), blake3::hash(&msg).as_bytes().to_vec(), "{n} bytes");
+            eprintln!(
+                "blake3 of {n} bytes: {} AND, {} XOR, {} OR, {} custom",
+                counts.direct_and, counts.direct_xor, counts.direct_or, counts.custom
+            );
+        }
+    }
+}

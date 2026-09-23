@@ -1,0 +1,25 @@
+[package]
+name = "whir-gc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A WHIR verifier over the binary tower fields as a boolean circuit, on bitvm-gc's circuit API"
+
+[dependencies]
+garbled-snark-verifier.workspace = true
+p3-binary-field.workspace = true
+p3-field.workspace = true
+
+[dev-dependencies]
+blake3 = "1"
+rand.workspace = true
+rand_chacha.workspace = true
+rand010.workspace = true
+p3-whir.workspace = true
+p3-binary-pcs.workspace = true
+p3-blake3.workspace = true
+p3-challenger.workspace = true
+p3-commit.workspace = true
+p3-merkle-tree.workspace = true
+p3-symmetric.workspace = true
+p3-sumcheck.workspace = true
