@@ -102,7 +102,7 @@ struct Run {
 }
 
 /// Prove a random `GF(2^128)` multilinear and verify it through the logger.
-fn prove_and_log(num_vars: usize, log_inv_rate: usize, folding: usize) -> Run {
+fn prove_and_log(num_vars: usize, log_inv_rate: usize, folding: usize, term_bits: usize, cap_height: Option<usize>) -> Run {
     let width = 1usize;
     let specs = vec![TableSpec::new(
         TableShape::new(num_vars, width),
@@ -115,10 +115,10 @@ fn prove_and_log(num_vars: usize, log_inv_rate: usize, folding: usize) -> Run {
     let num_variables = witness.num_variables();
 
     let domain = BooleanWhirDomain::default();
-    let config = BinaryWhirProfile::proven_list_decoding(110, log_inv_rate, folding)
+    let config = BinaryWhirProfile::proven_list_decoding(term_bits, log_inv_rate, folding)
         .config::<F, F, Challenger, _>(num_variables, &domain)
         .expect("profile config");
-    let cap_height = recommended_cap_height(&config);
+    let cap_height = cap_height.unwrap_or_else(|| recommended_cap_height(&config));
     let mmcs = Mmcs::new(Hash::new(Blake3), Compress::new(Blake3), cap_height);
     let pcs = Pcs::new(config, domain, mmcs);
 
@@ -393,7 +393,7 @@ impl Sponge for LogChecker<'_> {
 #[test]
 fn reference_matches_plonky3_on_real_binary_whir_proofs() {
     for (num_vars, rate, folding) in [(8usize, 3usize, 4usize), (12, 3, 4)] {
-        let run = prove_and_log(num_vars, rate, folding);
+        let run = prove_and_log(num_vars, rate, folding, 110, None);
         let observed = run.log.iter().filter(|o| matches!(o, Op::Observe(_))).count();
         eprintln!(
             "{num_vars} vars, rate 1/{}, folding {folding}: {observed} bytes observed, {} sampled\nschedule: {}",
@@ -439,5 +439,44 @@ fn reference_matches_plonky3_on_real_binary_whir_proofs() {
         let e = reference::verify(&cfg, &bad).expect_err("changed row");
         eprintln!("{num_vars} vars: changed row -> {e:?}");
         assert!(matches!(e, reference::Error::Merkle { .. }), "{e:?}");
+    }
+}
+
+/// The circuit on real proofs: it accepts, and rejects the proof with one
+/// input bit flipped. A single-root commitment (cap height zero) keeps every
+/// transcript flush within one Blake3 chunk, which is what the gadget hashes.
+#[test]
+fn circuit_accepts_real_proofs_and_rejects_a_flipped_bit() {
+    for (num_vars, term_bits) in [(8usize, 60usize), (8, 110), (12, 110)] {
+        let run = prove_and_log(num_vars, 3, 4, term_bits, Some(0));
+        let (cfg, data) = inputs(&run);
+        let ok = reference::verify(&cfg, &data).expect("the reference accepts");
+
+        let built = whir_gc::circuit::build(&cfg, &data);
+        let non_free = built.counts.direct_and + built.counts.direct_or;
+        eprintln!(
+            "{num_vars} vars, terminal security {term_bits}: queries {:?} + final {}, pow {}/{}, {} flushes, {} input bits\n  {} non-free gates ({} AND, {} OR), {} XOR",
+            ok.challenges.rounds.iter().map(|r| r.queries.len()).collect::<Vec<_>>(),
+            ok.challenges.final_queries.len(),
+            cfg.initial_folding_pow_bits,
+            cfg.final_pow_bits,
+            built.flushes,
+            built.witness.len(),
+            non_free,
+            built.counts.direct_and,
+            built.counts.direct_or,
+            built.counts.direct_xor
+        );
+        let wires = built.circuit.eval_gates(&built.witness);
+        assert!(wires[built.output], "the circuit must accept the proof it was built from");
+
+        // Any single input bit flipped must be rejected: the first bits belong
+        // to the root, the last to the final opening's paths.
+        for at in [0usize, built.witness.len() / 2, built.witness.len() - 1] {
+            let mut w = built.witness.clone();
+            w[at] = !w[at];
+            let wires = built.circuit.eval_gates(&w);
+            assert!(!wires[built.output], "bit {at} flipped must be rejected");
+        }
     }
 }

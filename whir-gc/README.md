@@ -36,11 +36,30 @@ schedule is what the circuit's transcript must reproduce.
 cargo test -p whir-gc --release -- --nocapture
 ```
 
+## The verifier as a circuit, measured
+
+`circuit::build` is `reference::verify` as gates -- the transcript on a
+wire-level `HashChallenger` over the Blake3 gadget, every opened row hashed
+and walked to the absorbed root, the folds, the STIR checks and the closing
+identity -- with one output wire. Its shape depends only on the configuration
+(the schedule has no data-dependent branch), so one circuit serves every proof
+of a configuration. On real Plonky3 proofs, single-root commitments, rate 1/8,
+folding 4, terminal security 110 (composed ≥ 103 bits):
+
+| proof | queries | non-free gates | free XOR | inputs | garbled at 16 B/gate |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 8 variables, no round | 72 final | **11,473,018** | 69.0M | 281,856 bits | ~184 MB |
+| 12 variables, one round | 68 + 33 final | **21,980,196** | 128.2M | 490,368 bits | ~352 MB |
+
+Each accepts the proof it was built from and rejects it with any single input
+bit flipped, evaluated in Execute mode. For scale, `bitvm-gc`'s Groth16
+verifier circuit is 2.72 × 10^9 non-free gates.
+
 ## Plan
 
-1. `reference`: the transcript and the verifier over the additive domain in
-   plain Rust, checked op for op against the logged run and accepting the real
-   proofs — the method `whir/` used for the prime-field verifier.
-2. The verifier as a `CircuitTrait` component mirroring it, run in Execute
-   mode on the real proofs.
-3. Garble and evaluate the 100-bit schedules; measure.
+1. Done: `reference`, checked op for op against the logged run and accepting
+   the real proofs; `circuit`, accepting them in Execute mode.
+2. Multi-chunk Blake3 in the gadget, so the commitment can be a Merkle cap
+   (64 roots absorb 2 KB but save six compressions per query).
+3. Garble and evaluate the 100-bit schedules with `bitvm-gc`'s garbler;
+   measure size and time.
