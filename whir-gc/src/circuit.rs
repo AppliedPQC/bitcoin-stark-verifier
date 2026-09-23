@@ -27,6 +27,7 @@ use p3_binary_field::TowerLevel;
 use crate::blake3;
 use crate::pruned;
 use crate::reference::{self, Config, Data, F};
+use crate::stream::ValuedBuilder;
 use crate::tower;
 
 pub type Byte = [usize; 8];
@@ -35,8 +36,6 @@ pub type Elem = Vec<usize>;
 
 const ELEM_BYTES: usize = 16;
 const INDEX_BYTES: usize = 8;
-/// The Blake3 gadget hashes one chunk.
-const CHUNK: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Bit helpers.
@@ -142,24 +141,31 @@ pub struct Inputs {
 }
 
 impl Inputs {
-    fn bytes<T: CircuitTrait>(&mut self, b: &mut T, bytes: &[u8]) -> Vec<Byte> {
+    fn bytes<T: ValuedBuilder>(&mut self, b: &mut T, bytes: &[u8]) -> Vec<Byte> {
         bytes
             .iter()
             .map(|&v| {
                 let w: Byte = b.fresh();
-                self.witness.extend((0..8).map(|i| (v >> i) & 1 == 1));
+                for (i, &wire) in w.iter().enumerate() {
+                    let bit = (v >> i) & 1 == 1;
+                    b.set_input(wire, bit);
+                    self.witness.push(bit);
+                }
                 w
             })
             .collect()
     }
 
-    fn elem<T: CircuitTrait>(&mut self, b: &mut T, x: F) -> Elem {
+    fn elem<T: ValuedBuilder>(&mut self, b: &mut T, x: F) -> Elem {
         let w = tower::fresh(b, 128);
-        self.witness.extend(elem_bits(x));
+        for (&wire, bit) in w.iter().zip(elem_bits(x)) {
+            b.set_input(wire, bit);
+            self.witness.push(bit);
+        }
         w
     }
 
-    fn sumcheck<T: CircuitTrait>(&mut self, b: &mut T, rounds: &[reference::SumcheckRoundData], pow_bits: usize) -> Vec<SumcheckInputs> {
+    fn sumcheck<T: ValuedBuilder>(&mut self, b: &mut T, rounds: &[reference::SumcheckRoundData], pow_bits: usize) -> Vec<SumcheckInputs> {
         rounds
             .iter()
             .map(|r| SumcheckInputs {
@@ -172,7 +178,7 @@ impl Inputs {
 
     /// Rows and full sibling paths: the pruned proof expanded outside the
     /// circuit, which is sound -- a path is a hint, the root is not.
-    fn opening<T: CircuitTrait>(&mut self, b: &mut T, o: &reference::Opening, indices: &[usize], index_width: usize) -> OpeningInputs {
+    fn opening<T: ValuedBuilder>(&mut self, b: &mut T, o: &reference::Opening, indices: &[usize], index_width: usize) -> OpeningInputs {
         let leaves: Vec<pruned::Digest> = o.rows.iter().map(|r| reference::leaf(r)).collect();
         let paths = pruned::expand(&o.boundaries, indices, &leaves, index_width, 0).expect("openings expand");
         let rows = o.rows.iter().map(|row| row.iter().map(|&x| self.elem(b, x)).collect()).collect();
@@ -181,7 +187,7 @@ impl Inputs {
     }
 
     /// Lay out the proof: every message in transcript order, then the openings.
-    pub fn allocate<T: CircuitTrait>(b: &mut T, cfg: &Config, d: &Data, ch: &reference::Challenges) -> Self {
+    pub fn allocate<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data, ch: &reference::Challenges) -> Self {
         let mut me = Self {
             root: Vec::new(),
             initial_ood_answers: Vec::new(),
@@ -241,7 +247,6 @@ impl Sponge {
 
     fn sample<T: CircuitTrait>(&mut self, b: &mut T) -> Byte {
         if self.output.is_empty() {
-            assert!(self.input.len() <= CHUNK, "a flush input of {} bytes needs multi-chunk Blake3", self.input.len());
             let digest = blake3::hash_bytes(b, &self.input);
             self.flushes += 1;
             self.input = digest.to_vec();
@@ -643,26 +648,42 @@ pub struct Built {
     pub flushes: usize,
 }
 
-/// Build the verifier circuit for `cfg`, with the witness `d` puts on it.
+/// What building on any backend yields: the output wire, the transcript's
+/// flush count and the witness the proof puts on the inputs.
+pub struct Shape {
+    pub output: usize,
+    pub flushes: usize,
+    pub witness: Vec<bool>,
+}
+
+/// Build the verifier circuit for `cfg` on `CircuitAdapter`, keeping the gates.
 pub fn build(cfg: &Config, d: &Data) -> Built {
+    let mut b = CircuitAdapter::default();
+    let shape = build_with(&mut b, cfg, d);
+    let counts = b.gate_counts();
+    Built { circuit: b, witness: shape.witness, output: shape.output, counts, flushes: shape.flushes }
+}
+
+/// Build the verifier circuit for `cfg` on any backend, with the values `d`
+/// puts on its inputs.
+pub fn build_with<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data) -> Shape {
     // The reference run, for the query indices the expanded paths need.
     let ch = reference::transcript(cfg, d, &mut reference::Challenger::new());
 
-    let mut b = CircuitAdapter::default();
-    let inputs = Inputs::allocate(&mut b, cfg, d, &ch);
-    let (t, m, flushes) = transcript(&mut b, &inputs, cfg, d);
+    let inputs = Inputs::allocate(b, cfg, d, &ch);
+    let (t, m, flushes) = transcript(b, &inputs, cfg, d);
     let mut checks: Vec<usize> = t.pow_checks.clone();
 
     // The initial constraint and claim.
     let mut eq_groups: Vec<Vec<Vec<Elem>>> = Vec::new();
     let mut eval_groups: Vec<Vec<Elem>> = Vec::new();
     for ((shape, y), evals) in cfg.claims.iter().zip(&t.opening_points).zip(&m.openings) {
-        let row = expand_univariate(&mut b, y, shape.row_vars);
+        let row = expand_univariate(b, y, shape.row_vars);
         let points: Vec<Vec<Elem>> = shape
             .selectors
             .iter()
             .map(|sel| {
-                let sel_wires: Vec<Elem> = sel.iter().map(|&c| tower::constant(&mut b, c.to_repr(), 128)).collect();
+                let sel_wires: Vec<Elem> = sel.iter().map(|&c| tower::constant(b, c.to_repr(), 128)).collect();
                 sel_wires.into_iter().chain(row.iter().cloned()).collect()
             })
             .collect();
@@ -670,14 +691,14 @@ pub fn build(cfg: &Config, d: &Data) -> Built {
         eval_groups.push(evals.clone());
     }
     if !t.initial_ood_points.is_empty() {
-        let points = t.initial_ood_points.iter().map(|y| expand_univariate(&mut b, y, cfg.num_variables)).collect();
+        let points = t.initial_ood_points.iter().map(|y| expand_univariate(b, y, cfg.num_variables)).collect();
         eq_groups.push(points);
         eval_groups.push(m.initial_ood_answers.clone());
     }
-    let mut claim = zero_elem(&mut b);
+    let mut claim = zero_elem(b);
     let mut shift = 0;
     for g in &eval_groups {
-        combine_into(&mut b, &mut claim, &t.alpha, shift, g);
+        combine_into(b, &mut claim, &t.alpha, shift, g);
         shift += g.len();
     }
     // (challenge, arity, initial power, eq points, direct points); the eq
@@ -686,7 +707,7 @@ pub fn build(cfg: &Config, d: &Data) -> Built {
         vec![(t.alpha.clone(), cfg.num_variables, 0, eq_groups.concat(), Vec::new())];
 
     for (r, x) in m.initial_sumcheck.iter().zip(&t.initial_folding) {
-        claim = sumcheck_round(&mut b, &claim, &r[0], &r[1], x);
+        claim = sumcheck_round(b, &claim, &r[0], &r[1], x);
     }
     let mut randomness: Vec<Elem> = t.initial_folding.clone();
     let mut prev_root: Vec<Byte> = m.root.clone();
@@ -694,15 +715,15 @@ pub fn build(cfg: &Config, d: &Data) -> Built {
 
     for (i, (rc, rt)) in cfg.rounds.iter().zip(&t.rounds).enumerate() {
         let reversed: Vec<Elem> = prev_folding.iter().rev().cloned().collect();
-        let (folds, merkle) = openings(&mut b, &inputs.rounds[i].opening, &rt.queries, &prev_root, &reversed);
+        let (folds, merkle) = openings(b, &inputs.rounds[i].opening, &rt.queries, &prev_root, &reversed);
         checks.extend(merkle);
-        let points: Vec<Vec<Elem>> = rt.queries.iter().map(|bits| query_point(&mut b, rc.num_variables, bits)).collect();
-        let ood: Vec<Vec<Elem>> = rt.ood_points.iter().map(|y| expand_univariate(&mut b, y, rc.num_variables)).collect();
-        combine_into(&mut b, &mut claim, &rt.combination, 1, &m.rounds[i].ood_answers);
-        combine_into(&mut b, &mut claim, &rt.combination, 1 + m.rounds[i].ood_answers.len(), &folds);
+        let points: Vec<Vec<Elem>> = rt.queries.iter().map(|bits| query_point(b, rc.num_variables, bits)).collect();
+        let ood: Vec<Vec<Elem>> = rt.ood_points.iter().map(|y| expand_univariate(b, y, rc.num_variables)).collect();
+        combine_into(b, &mut claim, &rt.combination, 1, &m.rounds[i].ood_answers);
+        combine_into(b, &mut claim, &rt.combination, 1 + m.rounds[i].ood_answers.len(), &folds);
         constraints.push((rt.combination.clone(), rc.num_variables, 1, ood, points));
         for (r, x) in m.rounds[i].sumcheck.iter().zip(&rt.folding) {
-            claim = sumcheck_round(&mut b, &claim, &r[0], &r[1], x);
+            claim = sumcheck_round(b, &claim, &r[0], &r[1], x);
         }
         randomness.extend(rt.folding.iter().cloned());
         prev_root = m.rounds[i].root.clone();
@@ -711,39 +732,38 @@ pub fn build(cfg: &Config, d: &Data) -> Built {
 
     // The final openings against the final polynomial.
     let reversed: Vec<Elem> = prev_folding.iter().rev().cloned().collect();
-    let (folds, merkle) = openings(&mut b, &inputs.final_opening, &t.final_queries, &prev_root, &reversed);
+    let (folds, merkle) = openings(b, &inputs.final_opening, &t.final_queries, &prev_root, &reversed);
     checks.extend(merkle);
     let final_vars = m.final_poly.len().trailing_zeros() as usize;
     for (fold, bits) in folds.iter().zip(&t.final_queries) {
-        let point = query_point(&mut b, final_vars, bits);
-        let at = eval_coefficients(&mut b, &m.final_poly, &point);
-        checks.push(equal(&mut b, &at, fold));
+        let point = query_point(b, final_vars, bits);
+        let at = eval_coefficients(b, &m.final_poly, &point);
+        checks.push(equal(b, &at, fold));
     }
     for (r, x) in m.final_sumcheck.iter().zip(&t.final_folding) {
-        claim = sumcheck_round(&mut b, &claim, &r[0], &r[1], x);
+        claim = sumcheck_round(b, &claim, &r[0], &r[1], x);
     }
     randomness.extend(t.final_folding.iter().cloned());
 
     // The weights in suffix order, and the closing identity.
     let reversed_all: Vec<Elem> = randomness.iter().rev().cloned().collect();
-    let mut total = zero_elem(&mut b);
+    let mut total = zero_elem(b);
     for (chi, arity, initial_power, eq_points, direct_points) in &constraints {
         let local = &reversed_all[..*arity];
         let mut shift = *initial_power;
-        let eq_w: Vec<Elem> = eq_points.iter().map(|p| eq_eval(&mut b, p, local)).collect();
-        let mut acc = zero_elem(&mut b);
-        combine_into(&mut b, &mut acc, chi, shift, &eq_w);
+        let eq_w: Vec<Elem> = eq_points.iter().map(|p| eq_eval(b, p, local)).collect();
+        let mut acc = zero_elem(b);
+        combine_into(b, &mut acc, chi, shift, &eq_w);
         shift += eq_w.len();
-        let sel_w: Vec<Elem> = direct_points.iter().map(|p| select_point_weight(&mut b, p, local)).collect();
-        combine_into(&mut b, &mut acc, chi, shift, &sel_w);
-        total = tower::add(&mut b, &total, &acc);
+        let sel_w: Vec<Elem> = direct_points.iter().map(|p| select_point_weight(b, p, local)).collect();
+        combine_into(b, &mut acc, chi, shift, &sel_w);
+        total = tower::add(b, &total, &acc);
     }
     let final_reversed: Vec<Elem> = t.final_folding.iter().rev().cloned().collect();
-    let final_value = eval_multilinear(&mut b, &m.final_poly, &final_reversed);
-    let expected = tower::mul(&mut b, &total, &final_value);
-    checks.push(equal(&mut b, &claim, &expected));
+    let final_value = eval_multilinear(b, &m.final_poly, &final_reversed);
+    let expected = tower::mul(b, &total, &final_value);
+    checks.push(equal(b, &claim, &expected));
 
-    let output = and_all(&mut b, &checks);
-    let counts = b.gate_counts();
-    Built { circuit: b, witness: inputs.witness, output, counts, flushes }
+    let output = and_all(b, &checks);
+    Shape { output, flushes, witness: inputs.witness }
 }

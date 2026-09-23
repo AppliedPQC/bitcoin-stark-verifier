@@ -47,11 +47,16 @@ enum Op {
 struct ByteLogger {
     inner: Inner,
     log: Arc<Mutex<Vec<Op>>>,
+    /// Off for the prover: its grinding would log every attempt (8 GB of
+    /// them at 2^18 variables).
+    logging: bool,
 }
 
 impl CanObserve<u8> for ByteLogger {
     fn observe(&mut self, value: u8) {
-        self.log.lock().unwrap().push(Op::Observe(value));
+        if self.logging {
+            self.log.lock().unwrap().push(Op::Observe(value));
+        }
         self.inner.observe(value);
     }
 }
@@ -59,13 +64,17 @@ impl CanObserve<u8> for ByteLogger {
 impl CanSample<u8> for ByteLogger {
     fn sample(&mut self) -> u8 {
         let v = self.inner.sample();
-        self.log.lock().unwrap().push(Op::Sample(v));
+        if self.logging {
+            self.log.lock().unwrap().push(Op::Sample(v));
+        }
         v
     }
 
     fn sample_into_slice(&mut self, values: &mut [u8]) {
         self.inner.sample_into_slice(values);
-        self.log.lock().unwrap().extend(values.iter().map(|&v| Op::Sample(v)));
+        if self.logging {
+            self.log.lock().unwrap().extend(values.iter().map(|&v| Op::Sample(v)));
+        }
     }
 }
 
@@ -76,8 +85,14 @@ type Commit = <Mmcs as p3_commit::Mmcs<F>>::Commitment;
 
 fn challenger() -> (Challenger, Arc<Mutex<Vec<Op>>>) {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let inner = ByteLogger { inner: HashChallenger::new(vec![], Blake3), log: log.clone() };
+    let inner = ByteLogger { inner: HashChallenger::new(vec![], Blake3), log: log.clone(), logging: true };
     (BinaryChallenger::new(inner), log)
+}
+
+/// The prover's challenger: the same, logging nothing.
+fn silent_challenger() -> Challenger {
+    let inner = ByteLogger { inner: HashChallenger::new(vec![], Blake3), log: Default::default(), logging: false };
+    BinaryChallenger::new(inner)
 }
 
 fn runs(log: &[Op]) -> String {
@@ -123,7 +138,7 @@ fn prove_and_log(num_vars: usize, log_inv_rate: usize, folding: usize, term_bits
     let mmcs = Mmcs::new(Hash::new(Blake3), Compress::new(Blake3), cap_height);
     let pcs = Pcs::new(config, domain, mmcs);
 
-    let (mut ch, _) = challenger();
+    let mut ch = silent_challenger();
     let (commitment, prover_data) =
         <Pcs as MultilinearPcs<F, Challenger>>::commit(&pcs, witness, &mut ch).expect("commit");
     let proof = <Pcs as MultilinearPcs<F, Challenger>>::open(&pcs, prover_data, protocol.clone(), &mut ch)
@@ -443,12 +458,14 @@ fn reference_matches_plonky3_on_real_binary_whir_proofs() {
     }
 }
 
-/// The circuit on real proofs: it accepts, and rejects the proof with one
-/// input bit flipped. A single-root commitment (cap height zero) keeps every
-/// transcript flush within one Blake3 chunk, which is what the gadget hashes.
+/// The circuit on real proofs, with its gates stored: it accepts, and rejects
+/// the proof with one input bit flipped. Eight variables only: the stored
+/// 12-variable build (21,980,196 non-free gates, measured here before) needs
+/// a 10 GB gate list, and `streaming_garbler_builds_verifies_and_scales`
+/// covers it gate for gate without one.
 #[test]
 fn circuit_accepts_real_proofs_and_rejects_a_flipped_bit() {
-    for (num_vars, term_bits) in [(8usize, 60usize), (8, 110), (12, 110)] {
+    for (num_vars, term_bits) in [(8usize, 60usize), (8, 110)] {
         let run = prove_and_log(num_vars, 3, 4, term_bits, Some(0));
         let (cfg, data) = inputs(&run);
         let ok = reference::verify(&cfg, &data).expect("the reference accepts");
@@ -482,12 +499,14 @@ fn circuit_accepts_real_proofs_and_rejects_a_flipped_bit() {
     }
 }
 
-/// M2: the verifier circuit garbled and evaluated. A valid proof's evaluation
-/// yields the output's true label; a proof with one bit flipped yields the
-/// false label. Sizes and times are the deliverable.
+/// M2: the verifier circuit garbled and evaluated from its stored gate list.
+/// A valid proof's evaluation yields the output's true label; a proof with
+/// one bit flipped yields the false label. The smallest proof only: the gate
+/// list plus a label per wire is what `stream` exists to avoid, and the
+/// streaming garbler is the one measured at scale.
 #[test]
 fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
-    for (num_vars, term_bits) in [(8usize, 110usize), (12, 110)] {
+    for (num_vars, term_bits) in [(8usize, 60usize)] {
         let run = prove_and_log(num_vars, 3, 4, term_bits, Some(0));
         let (cfg, data) = inputs(&run);
         let built = whir_gc::circuit::build(&cfg, &data);
@@ -520,5 +539,101 @@ fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
             eval_time,
             built.circuit.next_wire()
         );
+    }
+}
+
+/// The streaming backend: garbled, evaluated and checked gate by gate as the
+/// circuit is built, with one label and one bit per live wire and no gate
+/// stored. Its counts must match the stored-gate build's; a valid proof must
+/// accept and a changed row must not; and then the 2^18 schedule, which no
+/// stored build fits.
+#[test]
+fn streaming_garbler_builds_verifies_and_scales() {
+    for (num_vars, rate, term_bits) in [(8usize, 3usize, 110usize), (12, 3, 110)] {
+        streaming_case(num_vars, rate, term_bits);
+    }
+}
+
+/// The 2^18 schedule: rate 1/32, folding 4, terminal security 110. Its plan
+/// alone is a byte per wire, a gigabyte; run it on its own, under a memory
+/// cap (`ulimit -v`), not with the suite.
+#[test]
+#[ignore]
+fn streaming_garbler_on_the_2_18_schedule() {
+    streaming_case(18, 5, 110);
+}
+
+fn streaming_case(num_vars: usize, rate: usize, term_bits: usize) {
+    use whir_gc::stream::{Plan, Streaming};
+    {
+        let t = std::time::Instant::now();
+        let run = prove_and_log(num_vars, rate, 4, term_bits, Some(0));
+        let prove_time = t.elapsed();
+        let (cfg, data) = inputs(&run);
+        drop(run);
+        let ok = reference::verify(&cfg, &data).expect("the reference accepts");
+        eprintln!(
+            "{num_vars} vars: proved in {:.1?}; queries {:?} + final {}",
+            prove_time,
+            ok.challenges.rounds.iter().map(|r| r.queries.len()).collect::<Vec<_>>(),
+            ok.challenges.final_queries.len()
+        );
+
+        let t = std::time::Instant::now();
+        let mut plan = Plan::new();
+        whir_gc::circuit::build_with(&mut plan, &cfg, &data);
+        let plan_time = t.elapsed();
+        let plan_counts = plan.gate_counts();
+        let plan_wires = plan.wires();
+        eprintln!("{num_vars} vars: planned {plan_wires} wires in {plan_time:.1?}");
+
+        let t = std::time::Instant::now();
+        let mut s = Streaming::planned(plan, false);
+        let shape = whir_gc::circuit::build_with(&mut s, &cfg, &data);
+        let build_time = t.elapsed();
+        assert!(s.value(shape.output), "{num_vars} vars: the streamed circuit accepts");
+        let counts = s.gate_counts();
+        assert_eq!((plan_counts.direct_and, plan_counts.direct_or, plan_counts.direct_xor), (counts.direct_and, counts.direct_or, counts.direct_xor));
+        assert_eq!(plan_wires, s.wires());
+        eprintln!(
+            "{num_vars} vars, rate 1/{}, terminal security {term_bits}: queries {:?} + final {}; proved in {:.1?}; {} non-free gates ({} AND, {} OR), {} XOR, {} wires, {} inputs; planned in {:.1?}; garbled {} MB in {:.1?} with {} live slots at peak",
+            1 << rate,
+            ok.challenges.rounds.iter().map(|r| r.queries.len()).collect::<Vec<_>>(),
+            ok.challenges.final_queries.len(),
+            prove_time,
+            s.non_free_gates(),
+            counts.direct_and,
+            counts.direct_or,
+            counts.direct_xor,
+            s.wires(),
+            shape.witness.len(),
+            plan_time,
+            s.non_free_gates() * 16 / 1_000_000,
+            build_time,
+            s.peak_live(),
+        );
+
+        if num_vars < 18 {
+            // Against the stored-gate build (`circuit_accepts_real_proofs_and_rejects_a_flipped_bit`,
+            // whose counts these are; rebuilding it here would need its 4 GB), and unplanned.
+            let stored = match num_vars {
+                8 => 11_473_018,
+                12 => 21_980_196,
+                _ => unreachable!(),
+            };
+            assert_eq!(s.non_free_gates(), stored, "{num_vars} vars: the stored build's count");
+            let mut s = Streaming::new(false);
+            let unplanned = whir_gc::circuit::build_with(&mut s, &cfg, &data);
+            assert!(s.value(unplanned.output));
+            assert_eq!(s.wires(), plan_wires);
+
+            let mut bad = data.clone();
+            bad.final_opening.rows[0][0] += F::ONE;
+            let mut plan = Plan::new();
+            whir_gc::circuit::build_with(&mut plan, &cfg, &bad);
+            let mut s = Streaming::planned(plan, false);
+            let shape = whir_gc::circuit::build_with(&mut s, &cfg, &bad);
+            assert!(!s.value(shape.output), "{num_vars} vars: a changed row is rejected");
+        }
     }
 }

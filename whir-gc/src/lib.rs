@@ -10,4 +10,5 @@ pub mod circuit;
 pub mod garble;
 pub mod pruned;
 pub mod reference;
+pub mod stream;
 pub mod tower;

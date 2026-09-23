@@ -17,6 +17,7 @@ const CHUNK_LEN: usize = 1024;
 
 const CHUNK_START: u32 = 1 << 0;
 const CHUNK_END: u32 = 1 << 1;
+const PARENT: u32 = 1 << 2;
 const ROOT: u32 = 1 << 3;
 
 pub type U32 = [usize; 32];
@@ -216,11 +217,20 @@ fn words_from_little_endian_bytes(bytes: &[U8], words: &mut [U32]) {
 struct Output {
     input_chaining_value: [U32; 8],
     block_words: [U32; 16],
+    /// The chunk's counter; 0 for a parent node. The root's output blocks
+    /// are numbered instead.
+    counter: u64,
     block_len: U32,
     flags: U32,
 }
 
 impl Output {
+    /// The chaining value: the first eight words of the compression, for a
+    /// chunk or parent node that is not the root.
+    fn chaining_value<T: CircuitTrait>(&self, bld: &mut T) -> [U32; 8] {
+        first_8_words(compress(bld, &self.input_chaining_value, &self.block_words, self.counter, self.block_len, self.flags))
+    }
+
     fn root_output_bytes<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
         let root = const_u32_to_bits_le(bld, ROOT);
         for (output_block_counter, out_block) in out_slice.chunks_mut(2 * OUT_LEN).enumerate() {
@@ -325,20 +335,69 @@ impl ChunkState {
         Output {
             input_chaining_value: self.chaining_value,
             block_words,
+            counter: self.chunk_counter,
             block_len: const_u32_to_bits_le(bld, self.block_len as u32),
             flags,
         }
     }
 }
 
-/// An incremental hasher that can accept any number of writes.
+/// A parent node: the two children's chaining values as one block.
+fn parent_output<T: CircuitTrait>(
+    bld: &mut T,
+    left_child_cv: [U32; 8],
+    right_child_cv: [U32; 8],
+    key_words: [U32; 8],
+    flags: U32,
+) -> Output {
+    let zero_gate = bld.zero();
+    let mut block_words = [[zero_gate; 32]; 16];
+    block_words[..8].copy_from_slice(&left_child_cv);
+    block_words[8..].copy_from_slice(&right_child_cv);
+    let parent = const_u32_to_bits_le(bld, PARENT);
+    Output {
+        input_chaining_value: key_words,
+        block_words,
+        counter: 0,
+        block_len: const_u32_to_bits_le(bld, BLOCK_LEN as u32),
+        flags: or_u32(bld, flags, parent),
+    }
+}
+
+fn parent_cv<T: CircuitTrait>(
+    bld: &mut T,
+    left_child_cv: [U32; 8],
+    right_child_cv: [U32; 8],
+    key_words: [U32; 8],
+    flags: U32,
+) -> [U32; 8] {
+    parent_output(bld, left_child_cv, right_child_cv, key_words, flags).chaining_value(bld)
+}
+
+/// An incremental hasher that can accept any number of writes, in the tree
+/// mode of the reference implementation: a stack of subtree chaining values,
+/// merged as chunks complete and at the end.
 pub struct Hasher {
     chunk_state: ChunkState,
+    key_words: [U32; 8],
+    cv_stack: Vec<[U32; 8]>,
+    flags: U32,
 }
 
 impl Hasher {
     fn new_internal<T: CircuitTrait>(bld: &mut T, key_words: [U32; 8], flags: U32) -> Self {
-        Self { chunk_state: ChunkState::new(bld, key_words, 0, flags) }
+        Self { chunk_state: ChunkState::new(bld, key_words, 0, flags), key_words, cv_stack: Vec::new(), flags }
+    }
+
+    /// A completed chunk's chaining value joins the stack, merging with every
+    /// completed subtree of its size (the trailing zeros of the chunk count).
+    fn add_chunk_chaining_value<T: CircuitTrait>(&mut self, bld: &mut T, mut new_cv: [U32; 8], mut total_chunks: u64) {
+        while total_chunks & 1 == 0 {
+            let left = self.cv_stack.pop().expect("a subtree to merge with");
+            new_cv = parent_cv(bld, left, new_cv, self.key_words, self.flags);
+            total_chunks >>= 1;
+        }
+        self.cv_stack.push(new_cv);
     }
 
     /// Construct a new `Hasher` for the regular hash function.
@@ -352,6 +411,15 @@ impl Hasher {
     /// Add input to the hash state. This can be called any number of times.
     pub fn update<T: CircuitTrait>(&mut self, bld: &mut T, mut input: &[U8]) {
         while !input.is_empty() {
+            // A full chunk with more input coming is complete: its chaining
+            // value goes to the tree, and a new chunk starts.
+            if self.chunk_state.len() == CHUNK_LEN {
+                let chunk_cv = self.chunk_state.output(bld).chaining_value(bld);
+                let total_chunks = self.chunk_state.chunk_counter + 1;
+                self.add_chunk_chaining_value(bld, chunk_cv, total_chunks);
+                self.chunk_state = ChunkState::new(bld, self.key_words, total_chunks, self.flags);
+            }
+
             // Compress input bytes into the current chunk state.
             let want = CHUNK_LEN - self.chunk_state.len();
             let take = min(want, input.len());
@@ -362,7 +430,15 @@ impl Hasher {
 
     /// Finalize the hash and write any number of output bytes.
     pub fn finalize<T: CircuitTrait>(&self, bld: &mut T, out_slice: &mut [U8]) {
-        let output = self.chunk_state.output(bld);
+        // The last chunk, then every subtree on the stack, right to left,
+        // becomes the right child of a parent; the topmost parent is the root.
+        let mut output = self.chunk_state.output(bld);
+        let mut parent_nodes_remaining = self.cv_stack.len();
+        while parent_nodes_remaining > 0 {
+            parent_nodes_remaining -= 1;
+            let right = output.chaining_value(bld);
+            output = parent_output(bld, self.cv_stack[parent_nodes_remaining], right, self.key_words, self.flags);
+        }
         output.root_output_bytes(bld, out_slice);
     }
 }
@@ -402,11 +478,13 @@ mod tests {
     }
 
     /// The gadget against the `blake3` crate, and its AND count, at the two
-    /// lengths a Merkle verifier hashes.
+    /// lengths a Merkle verifier hashes and at multi-chunk lengths (the
+    /// transcript absorbs a 64-coefficient final polynomial in one flush):
+    /// two chunks, four (a two-level tree), five (an unbalanced one).
     #[test]
     fn matches_blake3_and_counts_gates() {
         let mut rng = ChaCha20Rng::seed_from_u64(3);
-        for n in [64usize, 256] {
+        for n in [64usize, 256, 1024, 1072, 2048, 4096, 4097] {
             let msg: Vec<u8> = (0..n).map(|_| rng.random()).collect();
             let mut bld = CircuitAdapter::default();
             let input: Vec<U8> = (0..n).map(|_| bld.fresh::<8>()).collect();
