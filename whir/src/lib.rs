@@ -30,6 +30,7 @@
 pub mod challenger;
 pub mod constraint;
 pub mod multilinear;
+pub mod pruned;
 pub mod reference;
 pub mod sponge;
 pub mod sumcheck;
