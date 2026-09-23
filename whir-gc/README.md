@@ -134,7 +134,13 @@ commitment and each query a selection of its root by the top `h` index bits
 | 18 variables, rate 1/32, 35 + 22 + 16 queries | 32 roots | **21,200,494** | −13% | **339 MB** | 10.0 s |
 
 `streaming_garbler_on_the_2_18_schedule` takes `WHIR_GC_CAP=<height>` to
-try another height.
+try another height. On the 2^18 schedule the recommendation is the optimum:
+the cap is shared by all three trees, so every commitment pays the flush
+and every query the selection, while only the deep paths save much.
+
+| cap on the 2^18 schedule | 1 | 32 | 64 | 128 | 256 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| non-free gates | 24,269,949 | **21,200,494** | 21,540,757 | 23,009,172 | 26,733,891 |
 
 ## Plan
 
