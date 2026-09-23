@@ -34,6 +34,7 @@ pub mod pruned;
 pub mod reference;
 pub mod sponge;
 pub mod sumcheck;
+pub mod transcript;
 pub mod verifier;
 
 pub(crate) mod treepp {

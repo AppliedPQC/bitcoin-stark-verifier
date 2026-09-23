@@ -1063,6 +1063,29 @@ fn replay_at(num_vars: usize) {
     let from_reference = reference::transcript(&cfg, &data, &mut reference::Challenger::new());
     assert_eq!(from_log, from_reference, "reference sponge draws differ from Plonky3's");
     assert!(from_log.pow_ok);
+
+    // Stage 3: the script. The transcript emitted from the same inputs must
+    // check every draw against the reference's and end in Plonky3's own
+    // sponge state, with the challenges it derived equal to Plonky3's.
+    let (emitter, from_script) =
+        whir::transcript::transcript(&cfg, &data, whir::transcript::Mode::Check);
+    assert_eq!(from_script, from_log, "script transcript draws differ from Plonky3's");
+    let body = emitter.script();
+    let got = run(script! {
+        for v in emitter.stream.iter().rev() { { *v } OP_TOALTSTACK }
+        for _ in 0..16 { 0 }
+        { body.clone() }
+    });
+    assert_eq!(
+        got,
+        ch.inner.sponge_state.map(|x| x.as_canonical_u32()).to_vec(),
+        "script sponge state differs from Plonky3's"
+    );
+    eprintln!(
+        "script transcript: {} permutations, {} bytes",
+        emitter.permutations,
+        body.len()
+    );
     eprintln!(
         "queries: rounds {:?} (distinct, draws), final {} in {} draws",
         from_log.rounds.iter().map(|r| (r.queries.len(), r.draws)).collect::<Vec<_>>(),
