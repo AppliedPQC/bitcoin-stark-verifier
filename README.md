@@ -77,31 +77,58 @@ The **statement** is supplied, and always will be: its point is public because
 it *is* the claim being proved, and a different point is a different statement
 rather than a cheaper proof of the same one.
 
-Two fidelity items remain against Plonky3. Each constraint group ends with a
-fresh squeeze for its batching challenge rather than reading whichever rate slot
-the query indices happened to leave — one permutation per round, traded for not
-coupling the challenge's position to the query count. And Plonky3 folds the
-statement and the commit phase's out-of-domain samples into one
-`initial_constraint` with a shared challenge, where this treats them as two
-groups.
+Three fidelity items remain against Plonky3 in `verify_and_close`, the
+proof-independent script whose cost is measured below. It squeezes afresh for
+each challenge and reads the rate forward, where Plonky3's `DuplexChallenger`
+buffers, pops the rate from the end and serves two extension challenges per
+permutation; it carries each round's claim into the next sumcheck without the
+per-round answer combination WHIR's decision phase requires; and it treats the
+statement and the commit phase's out-of-domain samples as two constraint groups
+where Plonky3 batches them under one challenge. Each is resolved in
+`proof_script::build`, the proof-bound verifier of the [end-to-end](#end-to-end)
+run, which is checked against Plonky3 rather than against this crate's own
+reference.
 
 
 ## End to end
 
 `whir/tests/end_to_end.rs` runs [Plonky3](https://github.com/Plonky3/Plonky3)'s
 actual WHIR prover over KoalaBear, verifies the proof with **Plonky3's own
-verifier**, then re-derives the same claims in Bitcoin Script and executes it.
+verifier**, and then verifies the same proof in Bitcoin Script:
+`proof_script::build` emits, for one proof, the script that performs the whole
+verification — the transcript on the script's own sponge, every opened row
+hashed and walked to its root, the folds, the STIR checks, the weights and the
+closing identity — and the test executes it.
 
-The native verification comes first on purpose. Every other test compares a
-script against a Rust reference, which establishes that the two agree — not that
-either is right. Where a primitive exists in Plonky3, it is checked against
-Plonky3 directly: `eq_eval` against `Point::eval_eq`, `expand_univariate`
-against `Point::expand_from_univariate`, the leaf hash against
-`PaddingFreeSponge`.
+| proof | script | peak stack | transcript permutations |
+|---|---|---|---|
+| 6 variables, no intermediate round | 172.9 MB | 2,652 | 37 |
+| 8 variables, one intermediate round | 312.8 MB | 4,616 | 44 |
 
-No hand-built vectors are involved. Perturbing any evaluation moves the squeezed
-challenge, which moves the chained claim, which breaks the closing identity —
-asserted for every evaluation in the proof.
+A wrong final domain generator, a changed opened row and a changed final
+polynomial are each rejected.
+
+The script mirrors `reference::verify`, the verifier in plain Rust, and that in
+turn is checked against Plonky3 at every layer rather than only at the end:
+a logging challenger records the observe/sample sequence Plonky3's verifier
+actually executes (every one of its samplers is a trait default over one
+primitive `sample()`); `reference::Challenger` and then `reference::transcript`
+reproduce it draw for draw; the script transcript ends in Plonky3's own sponge
+state; and `reference::verify` accepts the real proofs before the script is
+asked to. The native verification comes first on purpose: every other test
+compares a script against a Rust reference, which establishes that the two
+agree — not that either is right.
+
+Two boundaries. The script is **built from the proof it verifies**, because a
+transcript's schedule (STIR queries are drawn until enough are distinct) and the
+openings' shape are the proof's; it trusts none of it — every challenge comes
+from its own sponge, every draw's rejection and duplicate decision is checked in
+script — but a proof-independent fixed script would need that loop unrolled to
+a bound with conditional permutations, which no on-chain WHIR verifier avoids.
+And the **1000-item stack limit is lifted** for the run: a 35-query proof's
+Merkle data alone exceeds it, and a deployment chunks the verification across
+transactions (see [Chunks](#chunks)); whether the script verifies is a separate
+question from how it is split.
 
 ## Measured cost
 
