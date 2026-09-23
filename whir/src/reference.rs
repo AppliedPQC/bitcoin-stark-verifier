@@ -94,6 +94,87 @@ pub fn squeeze(state: &mut [u32; 16]) -> [u32; RATE] {
     state[..RATE].try_into().unwrap()
 }
 
+/// Plonky3's `DuplexChallenger`, buffering and all.
+///
+/// The bare [`duplexing`]/[`squeeze`] above match Plonky3's permutation input
+/// exactly, but a real transcript's challenges depend on *when* the sponge
+/// permutes and *which* rate slots a sample reads -- and those are governed by
+/// two buffers, not by the permutation. This mirrors them, so a replay of a real
+/// proof draws the same challenges Plonky3 drew.
+///
+/// The two things the bare functions leave out:
+/// - **Observes are buffered.** They accumulate until the rate is full or a
+///   sample forces a permutation, so several observes fold into one absorb.
+/// - **Samples pop the rate from the end.** One permutation's output is consumed
+///   `rate[7]`, `rate[6]`, .. down to `rate[0]` before the next permutation, and
+///   an EF element is four such pops, its coefficients in that order.
+#[derive(Clone, Debug)]
+pub struct Challenger {
+    state: [u32; 16],
+    input: Vec<u32>,
+    output: Vec<u32>,
+}
+
+impl Default for Challenger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Challenger {
+    /// A challenger over the zero state, as `DuplexChallenger::new` starts.
+    pub fn new() -> Self {
+        Self { state: [0u32; 16], input: Vec::new(), output: Vec::new() }
+    }
+
+    /// The current sponge state, for tests that compare against Plonky3's.
+    pub fn state(&self) -> [u32; 16] {
+        self.state
+    }
+
+    /// Absorb one field element. Buffered outputs are now stale.
+    pub fn observe(&mut self, value: u32) {
+        self.output.clear();
+        self.input.push(value);
+        if self.input.len() == RATE {
+            self.duplex();
+        }
+    }
+
+    /// Absorb a slice, one element at a time (the buffering is what matters).
+    pub fn observe_slice(&mut self, values: &[u32]) {
+        for &v in values {
+            self.observe(v);
+        }
+    }
+
+    /// Absorb the buffered inputs (or, with none, squeeze) and refill the output.
+    fn duplex(&mut self) {
+        duplexing(&mut self.state, &self.input);
+        self.input.clear();
+        self.output.clear();
+        self.output.extend_from_slice(&self.state[..RATE]);
+    }
+
+    /// One field-element challenge: the next rate slot from the end.
+    pub fn sample(&mut self) -> u32 {
+        if !self.input.is_empty() || self.output.is_empty() {
+            self.duplex();
+        }
+        self.output.pop().expect("output refilled by duplex")
+    }
+
+    /// An EF element: four field samples, its coefficients in pop order.
+    pub fn sample_ef(&mut self) -> [u32; 4] {
+        [self.sample(), self.sample(), self.sample(), self.sample()]
+    }
+
+    /// A query index: the low `bits` of one field sample.
+    pub fn sample_bits(&mut self, bits: usize) -> u32 {
+        sample_bits(self.sample(), bits)
+    }
+}
+
 /// `DuplexChallenger::sample_bits`: take a squeezed field element and keep its
 /// low `bits` bits. Plonky3 asserts `2^bits < |F|`, so no reduction is needed.
 pub fn sample_bits(rate_element: u32, bits: usize) -> u32 {

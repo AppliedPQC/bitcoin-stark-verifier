@@ -1,79 +1,76 @@
-//! Does `whir::reference`'s sponge reproduce Plonky3's `DuplexChallenger`?
+//! `whir::reference::Challenger` reproduces Plonky3's `DuplexChallenger`.
 //!
-//! Everything the script re-derives -- OOD points, batching challenges, query
-//! indices -- is a Fiat-Shamir sample. A real proof can only go through the
-//! script verifier if the reference sponge, which the script mirrors, squeezes
-//! the *same* values Plonky3's challenger does. Nothing tests that today: the
-//! end-to-end tests feed the script made-up challenges and check only its
-//! arithmetic, so this gap has never surfaced.
-//!
-//! It records what the two actually do. Plonky3 fills an output buffer with the
-//! rate `[rate[0], .., rate[7]]` and `pop()`s it from the *end*: the first
-//! sample is `rate[7]`, the next `rate[6]`, and so on, re-permuting only when the
-//! buffer empties or a new value is observed. The reference reads the rate
-//! *forward* from `rate[0]` and re-squeezes every `RATE`. The two diverge at the
-//! very first sample.
+//! Every challenge the script re-derives -- OOD points, batching randomness,
+//! query indices -- is a sponge sample, so a real proof passes the script
+//! verifier only if the reference sponge, which the script mirrors, draws what
+//! Plonky3 draws. The bare `duplexing`/`squeeze` primitives match the
+//! permutation input but not the buffering: observes are batched, and one
+//! permutation's rate is consumed from the end (`rate[7]`, `rate[6]`, ..), an EF
+//! element being four such pops. `reference::Challenger` mirrors both, and this
+//! checks it against a real `DuplexChallenger` over an interleaved schedule.
 
-use p3_challenger::{CanObserve, CanSample, DuplexChallenger};
+use p3_challenger::{CanObserve, CanSample, CanSampleBits, DuplexChallenger};
 use p3_field::extension::BinomialExtensionField;
 use p3_field::{BasedVectorSpace, PrimeField32};
 use p3_koala_bear::{default_koalabear_poseidon2_16, KoalaBear, Poseidon2KoalaBear};
-use whir::reference;
+use whir::reference::Challenger;
 
 type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
 type Perm = Poseidon2KoalaBear<16>;
 type Ch = DuplexChallenger<F, Perm, 16, 8>;
 
+fn f(x: u32) -> F {
+    F::new(x)
+}
 fn u(x: F) -> u32 {
     x.as_canonical_u32()
 }
 
-/// Plonky3 consumes one permutation's rate from the end; the reference from the
-/// start. This states the exact relationship, so a future replay can bridge it
-/// rather than rediscover it.
+/// The two challengers agree sample for sample over a schedule that exercises
+/// every boundary: observes shorter than, equal to and longer than the rate,
+/// samples that drain a permutation and force the next, EF samples that straddle
+/// a refill, and query bits -- with more observes afterwards.
 #[test]
-fn duplex_challenger_pops_the_rate_in_reverse() {
-    let mut ch: Ch = DuplexChallenger::new(default_koalabear_poseidon2_16());
-    let mut st = [0u32; 16];
+fn reference_challenger_matches_plonky3() {
+    let mut plonky = Ch::new(default_koalabear_poseidon2_16());
+    let mut mirror = Challenger::new();
 
-    // One absorb of five field elements, then a permutation's worth of samples.
-    let inputs: Vec<u32> = (1..=5).collect();
-    for &x in &inputs {
-        ch.observe(F::new(x));
+    let observe = |p: &mut Ch, m: &mut Challenger, xs: &[u32]| {
+        for &x in xs {
+            p.observe(f(x));
+        }
+        m.observe_slice(xs);
+    };
+    let field = |p: &mut Ch, m: &mut Challenger, tag: &str| {
+        let a: F = p.sample();
+        let b = m.sample();
+        assert_eq!(u(a), b, "field sample disagreed ({tag})");
+    };
+    let ext = |p: &mut Ch, m: &mut Challenger, tag: &str| {
+        let a: EF = p.sample();
+        let ac: Vec<u32> = a.as_basis_coefficients_slice().iter().map(|x| u(*x)).collect();
+        assert_eq!(ac, m.sample_ef().to_vec(), "EF sample disagreed ({tag})");
+    };
+    let bits = |p: &mut Ch, m: &mut Challenger, n: usize, tag: &str| {
+        let a: usize = p.sample_bits(n);
+        assert_eq!(a as u32, m.sample_bits(n), "bit sample disagreed ({tag})");
+    };
+
+    observe(&mut plonky, &mut mirror, &[1, 2, 3]); // short of the rate
+    field(&mut plonky, &mut mirror, "after 3");
+    ext(&mut plonky, &mut mirror, "straddles the first refill");
+    observe(&mut plonky, &mut mirror, &(0..8).collect::<Vec<_>>()); // exactly the rate
+    ext(&mut plonky, &mut mirror, "after a full-rate observe");
+    field(&mut plonky, &mut mirror, "mid-buffer");
+    bits(&mut plonky, &mut mirror, 6, "query index");
+    observe(&mut plonky, &mut mirror, &(100..111).collect::<Vec<_>>()); // longer than the rate
+    for i in 0..10 {
+        field(&mut plonky, &mut mirror, &format!("drain {i}"));
     }
-    reference::duplexing(&mut st, &inputs);
-    let rate = st; // rate[0..8] is this permutation's output
+    ext(&mut plonky, &mut mirror, "final");
 
-    // Plonky3's samples, in order, are rate[7], rate[6], .. rate[0].
-    // A field sample is one pop; an EF sample is four, its coefficients in pop
-    // order. Eight elements exactly drain one permutation.
-    let s0: F = ch.sample();
-    assert_eq!(u(s0), rate[7], "first field sample is rate[7], not rate[0]");
-
-    let e: EF = ch.sample();
-    let ec: Vec<u32> = e.as_basis_coefficients_slice().iter().map(|x| u(*x)).collect();
-    assert_eq!(ec, vec![rate[6], rate[5], rate[4], rate[3]], "EF coeffs are rate[6..2], reversed");
-
-    // Three field samples drain rate[2], rate[1], rate[0]; the buffer is now empty.
-    for expected in [rate[2], rate[1], rate[0]] {
-        let s: F = ch.sample();
-        assert_eq!(u(s), expected);
-    }
-
-    // The next sample must re-permute (empty output buffer, no new input).
-    // The reference reproduces it with a bare squeeze.
-    let next: F = ch.sample();
-    let squeezed = reference::squeeze(&mut st);
-    assert_eq!(u(next), squeezed[7], "after a drain, the next sample is the new rate[7]");
-
-    // The mismatch, stated as an inequality so its removal is a real change:
-    // the reference's forward first sample is not Plonky3's.
-    let mut st2 = [0u32; 16];
-    reference::duplexing(&mut st2, &inputs);
-    assert_ne!(
-        st2[0], rate[7],
-        "reference reads rate[0] forward; Plonky3 pops rate[7]. If this ever \
-         holds, the sponge was reconciled and the replay can drop the reversal."
-    );
+    // And the states themselves line up, so nothing diverged silently.
+    let ps: Vec<u32> = plonky.sponge_state.iter().map(|x| u(*x)).collect();
+    assert_eq!(ps, mirror.state().to_vec(), "sponge states diverged");
 }
