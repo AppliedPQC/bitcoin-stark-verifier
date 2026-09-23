@@ -30,9 +30,12 @@
 pub mod challenger;
 pub mod constraint;
 pub mod multilinear;
+pub mod proof_script;
+pub mod pruned;
 pub mod reference;
 pub mod sponge;
 pub mod sumcheck;
+pub mod transcript;
 pub mod verifier;
 
 pub(crate) mod treepp {

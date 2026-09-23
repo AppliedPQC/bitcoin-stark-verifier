@@ -139,6 +139,24 @@ struct Tree {
     rows: Vec<Vec<u32>>,
 }
 
+/// A config whose single main-loop round has no shift queries.
+///
+/// WHIR's per-round combination is
+/// `sigma_i = h_{i-1,k}(alpha) + gamma_i*y_{i,0} + sum_j gamma_i^{j+1}*g_{i-1}(z_{i,j})`.
+/// Dropping the shift queries leaves exactly the OOD batch, which the mirror can
+/// compute exactly -- the `g(z_j)` terms would need a fold of the queried rows.
+/// Two OOD samples per commitment keep the derived constraints non-trivial.
+fn query_free() -> Config {
+    Config {
+        initial_folding_factor: 2,
+        initial_ood_samples: 2,
+        rounds: vec![Round { folding_factor: 2, num_queries: 0, log_domain_size: 6, ood_samples: 2, row_len: 4, domain_gen: 7 }],
+        final_round: Round { folding_factor: 2, num_queries: 0, log_domain_size: 4, ood_samples: 0, row_len: 4, domain_gen: 11 },
+        final_sumcheck_rounds: 2,
+        final_poly_vars: 2,
+    }
+}
+
 fn build_tree(depth: usize, row_len: usize, rng: &mut ChaCha20Rng) -> Tree {
     let rows: Vec<Vec<u32>> = (0..(1usize << depth))
         .map(|_| (0..row_len).map(|_| rand_f(rng)).collect())
@@ -191,30 +209,43 @@ struct Spine {
     /// The constraint groups the schedule derives: per group, its batching
     /// challenge, its scalars in sampling order, and its arity.
     groups: Vec<([u32; 4], Vec<[u32; 4]>, usize)>,
+    /// The same chain, threaded the way WHIR's decision phase 2(c) requires:
+    /// before each main-loop round's sumcheck the claim becomes
+    /// `sigma_i = h_{i-1,k}(alpha) + gamma_i*y_{i,0} + sum_j gamma_i^{j+1}*g(z_j)`.
+    /// `verify` never performs that combination, so this differs from `claim`.
+    /// Only faithful for rounds with no shift queries: the `g(z_j)` terms need a
+    /// fold the mirror does not compute, so the paper-faithful test uses a
+    /// query-free round where the combination is exactly the OOD batch.
+    paper_claim: [u32; 4],
 }
 
 fn build_spine(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0: [u32; 4]) -> Spine {
     let mut items = Vec::new();
     let mut state = state0;
     let mut claim = claim0;
+    let mut paper_claim = claim0;
 
     let mut randomness: Vec<[u32; 4]> = Vec::new();
-    let sumcheck = |n: usize, items: &mut Vec<u32>, state: &mut [u32; 16], claim: &mut [u32; 4], rng: &mut ChaCha20Rng, randomness: &mut Vec<[u32; 4]>| {
+    let sumcheck = |n: usize, items: &mut Vec<u32>, state: &mut [u32; 16], claim: &mut [u32; 4], paper_claim: &mut [u32; 4], rng: &mut ChaCha20Rng, randomness: &mut Vec<[u32; 4]>| {
         for _ in 0..n {
             let (c0, c_inf) = (rand_ef(rng), rand_ef(rng));
             items.extend_from_slice(&c0);
             items.extend_from_slice(&c_inf);
             let (next, r) = reference::sumcheck_round_fs(state, *claim, c0, c_inf);
             *claim = next;
+            // The paper-faithful chain runs over the same emitted polynomials and
+            // the same challenge; only the claim it starts from differs.
+            *paper_claim = reference::sumcheck_round(*paper_claim, c0, c_inf, r);
             randomness.push(r);
         }
     };
-    let absorb = |n: usize, items: &mut Vec<u32>, state: &mut [u32; 16], rng: &mut ChaCha20Rng| {
+    let absorb = |n: usize, items: &mut Vec<u32>, state: &mut [u32; 16], rng: &mut ChaCha20Rng| -> Vec<u32> {
         let vals: Vec<u32> = (0..n).map(|_| rand_f(rng)).collect();
         items.extend_from_slice(&vals);
         for block in vals.chunks(reference::RATE) {
             reference::duplexing(state, block);
         }
+        vals
     };
 
     // Every query in a round has to reach a committed root, so the mirror builds
@@ -279,13 +310,13 @@ fn build_spine(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0: [
         // permuting, so the mirror only has to keep the order -- and to record
         // the point, which is now a constraint the closing check will evaluate.
         scalars.push([state[0], state[1], state[2], state[3]]);
-        absorb(4, &mut items, &mut state, rng);
+        let _ = absorb(4, &mut items, &mut state, rng);
     }
     // The initial commitment has every variable, so its constraint reads all of R.
     let chi = batching(&mut state);
     scalars.push(chi);
     groups.push((chi, scalars[..scalars.len() - 1].to_vec(), m));
-    sumcheck(cfg.initial_folding_factor, &mut items, &mut state, &mut claim, rng, &mut randomness);
+    sumcheck(cfg.initial_folding_factor, &mut items, &mut state, &mut claim, &mut paper_claim, rng, &mut randomness);
     let mut r_len = cfg.initial_folding_factor;
 
     for (i, r) in cfg.rounds.iter().enumerate() {
@@ -293,18 +324,26 @@ fn build_spine(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0: [
         // Absorb the *next* codeword's root, then open the previous one.
         commit(&trees[i + 1], &mut items, &mut state);
         let mut scalars: Vec<[u32; 4]> = Vec::new();
+        let mut ood_answers: Vec<[u32; 4]> = Vec::new();
         for _ in 0..r.ood_samples {
             scalars.push([state[0], state[1], state[2], state[3]]);
-            absorb(4, &mut items, &mut state, rng);
+            // The absorbed value *is* the round's OOD reply y_{i,0}.
+            let y = absorb(4, &mut items, &mut state, rng);
+            ood_answers.push([y[0], y[1], y[2], y[3]]);
         }
         queries(r, &trees[i], &mut items, &mut state, &mut scalars);
         let chi = batching(&mut state);
+        // WHIR decision phase 2(c): the claim entering this round's sumcheck is
+        // the previous round's ending value batched with the OOD reply (and, for
+        // a round with shift queries, the folded shift answers -- which is why
+        // the paper-faithful instance uses a query-free round).
+        paper_claim = reference::combine_answers(paper_claim, chi, &ood_answers);
         groups.push((chi, scalars, arity));
-        sumcheck(r.folding_factor, &mut items, &mut state, &mut claim, rng, &mut randomness);
+        sumcheck(r.folding_factor, &mut items, &mut state, &mut claim, &mut paper_claim, rng, &mut randomness);
         r_len += r.folding_factor;
     }
     let poly_start = items.len();
-    absorb(4 << cfg.final_poly_vars, &mut items, &mut state, rng);
+    let _ = absorb(4 << cfg.final_poly_vars, &mut items, &mut state, rng);
     let final_poly: Vec<[u32; 4]> = items[poly_start..]
         .chunks(4)
         .map(|c| [c[0], c[1], c[2], c[3]])
@@ -319,9 +358,9 @@ fn build_spine(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0: [
         &mut state,
         &mut unused,
     );
-    sumcheck(cfg.final_sumcheck_rounds, &mut items, &mut state, &mut claim, rng, &mut randomness);
+    sumcheck(cfg.final_sumcheck_rounds, &mut items, &mut state, &mut claim, &mut paper_claim, rng, &mut randomness);
 
-    Spine { items, claim, state, randomness, final_poly, groups }
+    Spine { items, claim, state, randomness, final_poly, groups, paper_claim }
 }
 
 /// The spine executes, and lands where the reference does.
@@ -651,6 +690,17 @@ struct Closing {
 }
 
 fn build_closing(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0: [u32; 4]) -> Closing {
+    build_closing_for(cfg, rng, state0, claim0, false)
+}
+
+/// Build a closing instance whose statement is solved against one of the two
+/// chains: the one `verify` actually produces (`paper == false`), or the one
+/// WHIR's decision phase 2(c) requires (`paper == true`).
+///
+/// The emitted transcript is identical either way -- the combination changes how
+/// a verifier *threads* the claim, not what the prover sends -- so the two
+/// instances differ only in which claim the constraint was solved to satisfy.
+fn build_closing_for(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0: [u32; 4], paper: bool) -> Closing {
     let spine = build_spine(cfg, rng, state0, claim0);
     let m = total_folding_vars(cfg);
     assert_eq!(spine.randomness.len(), m);
@@ -684,7 +734,8 @@ fn build_closing(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0:
         "degenerate instance: eq or the final evaluation vanished"
     );
     // claim = (derived + weight*e) * f_at_r  =>  weight = (claim/f_at_r - derived)/e
-    let target = to_ef(spine.claim) * p3_field::Field::inverse(&to_ef(f_at_r));
+    let against = if paper { spine.paper_claim } else { spine.claim };
+    let target = to_ef(against) * p3_field::Field::inverse(&to_ef(f_at_r));
     let weight = of_ef((target - to_ef(derived)) * p3_field::Field::inverse(&to_ef(e)));
 
     // The reference agrees the identity holds, independently of any script.
@@ -692,7 +743,7 @@ fn build_closing(cfg: &Config, rng: &mut ChaCha20Rng, state0: [u32; 16], claim0:
     let total = pf::ext4::add(derived, supplied);
     assert_eq!(
         of_ef(to_ef(total) * to_ef(f_at_r)),
-        spine.claim,
+        against,
         "the constructed instance does not satisfy w(R) * f_M(r_fin) == claim"
     );
 
@@ -740,6 +791,63 @@ fn the_composed_verifier_closes() {
         "the closing identity was rejected: {:?} at {:?}",
         info.error,
         info.last_opcode
+    );
+}
+
+/// The per-round combination WHIR's decision phase 2(c) requires is missing.
+///
+/// A round ends by folding its out-of-domain reply into the *next* target:
+///
+/// ```text
+/// sigma_i := h_{i-1,k}(alpha_{i-1,k}) + gamma_i*y_{i,0} + sum_j gamma_i^{j+1}*g_{i-1}(z_{i,j})
+/// ```
+///
+/// That is what `constraint::combine_answers` computes, and `verify` never calls
+/// it: the claim carries over from one round's sumcheck to the next untouched,
+/// while the OOD reply is absorbed and then dropped. The two instances below
+/// share one transcript and differ only in which chain their statement was
+/// solved against, so the pair isolates exactly that combination.
+///
+/// The control passes because the mirror reproduces `verify`'s own arithmetic.
+/// The paper-faithful instance is rejected -- and a real proof is a
+/// paper-faithful instance, which is why this is a completeness failure rather
+/// than a soundness gap. Tracked as AppliedPQC/pqc-research#39.
+#[test]
+fn the_per_round_combination_is_missing() {
+    let cfg = query_free();
+
+    // Control: the statement is solved against the chain `verify` produces.
+    let mut rng = ChaCha20Rng::seed_from_u64(31);
+    let state0: [u32; 16] = core::array::from_fn(|_| rand_f(&mut rng));
+    let claim0 = rand_ef(&mut rng);
+    let control = build_closing_for(&cfg, &mut rng, state0, claim0, false);
+    let info = bitcoin_scriptexec::execute_script(closing_spend(&cfg, &control, state0, claim0, &control.spine.items));
+    assert!(
+        info.error.is_none(),
+        "the control instance must close: {:?} at {:?}",
+        info.error,
+        info.last_opcode
+    );
+
+    // The same transcript, with the statement solved against the paper's chain.
+    let mut rng = ChaCha20Rng::seed_from_u64(31);
+    let state0: [u32; 16] = core::array::from_fn(|_| rand_f(&mut rng));
+    let claim0 = rand_ef(&mut rng);
+    let paper = build_closing_for(&cfg, &mut rng, state0, claim0, true);
+
+    // Same bytes on the wire: the combination is a verifier-side step.
+    assert_eq!(paper.spine.items, control.spine.items, "the transcript must be identical");
+    // ...and the combination has to actually move the claim, or this says nothing.
+    assert_ne!(
+        paper.spine.paper_claim, paper.spine.claim,
+        "the OOD batch did not move the claim; the instance would be vacuous"
+    );
+
+    let info = bitcoin_scriptexec::execute_script(closing_spend(&cfg, &paper, state0, claim0, &paper.spine.items));
+    assert!(
+        info.error.is_some(),
+        "verify_and_close accepted a paper-faithful instance -- the per-round \
+         combination is present after all, and this test is obsolete"
     );
 }
 
@@ -801,6 +909,7 @@ fn clone_closing(c: &Closing) -> Closing {
             randomness: c.spine.randomness.clone(),
             final_poly: c.spine.final_poly.clone(),
             groups: c.spine.groups.clone(),
+            paper_claim: c.spine.paper_claim,
         },
         weight: c.weight,
         point: c.point.clone(),
