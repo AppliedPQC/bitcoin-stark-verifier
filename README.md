@@ -112,15 +112,15 @@ a script some test executes.
 | | bytes |
 | --- | ---: |
 | one Poseidon2 permutation | 572,228 |
-| one Merkle level | 572,252 *(24 bytes of ordering overhead)* |
-| Merkle path at depth 21 | 12,017,292 — **3.0 blocks** |
+| one Merkle level | 572,251 *(23 bytes of ordering overhead)* |
+| Merkle path at depth 21 | 12,017,295 — **3.0 blocks** |
 | `sumcheck_round()` | 95,100 |
 | `sumcheck_round_fs()` | 667,539 |
 | …keeping its challenge for the closing check | 667,615 — **+76 B, 0.011%** |
 | `eval_multilinear(4)` | 358,048 |
 | `eq_eval(4)` | 190,780 |
 | `constraint_eval`, 10 constraints of arity 8 | 4,053,279 |
-| …derived from scalars instead | 5,687,109 — **+40%** |
+| …derived from scalars instead | 5,687,370 — **+40.3%** |
 | the whole closing check, example config | 92,801,911 — **7.5%, 0 permutations** |
 | **composed sumcheck chain, one real proof** | **8,967,342** |
 
