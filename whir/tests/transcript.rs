@@ -34,6 +34,7 @@ fn run(s: bitcoin::ScriptBuf) -> Vec<u32> {
 
 /// The shape of a proof's prover messages, beyond what the config fixes.
 struct Shape {
+    /// The WHIR seed's length; the other seeds take fixed lengths below.
     pattern_len: usize,
     /// Evaluations absorbed per opening claim.
     openings: Vec<usize>,
@@ -109,7 +110,7 @@ fn stress() -> (TranscriptConfig, Shape) {
             ],
             final_pow_bits: 4,
             final_queries: 8,
-            // Eight of sixteen: plenty of duplicates to redraw.
+            // Eight of sixteen: duplicates are kept, not redrawn.
             final_domain_bits: 4,
             final_sumcheck_rounds: 3,
             final_folding_pow_bits: 1,
@@ -132,9 +133,19 @@ fn sumcheck(rng: &mut ChaCha20Rng, rounds: usize) -> Vec<SumcheckRoundData> {
         .collect()
 }
 
+fn seed(rng: &mut ChaCha20Rng, n: usize) -> Vec<u32> {
+    (0..n).map(|_| field(rng)).collect()
+}
+
 fn synthetic(rng: &mut ChaCha20Rng, cfg: &TranscriptConfig, shape: &Shape) -> TranscriptData {
     TranscriptData {
-        pattern: (0..shape.pattern_len).map(|_| field(rng)).collect(),
+        seed_commitment: seed(rng, 35),
+        seed_virtual: (0..cfg.commitment_ood_samples).map(|_| seed(rng, 54)).collect(),
+        seed_claim: shape.openings.iter().map(|_| seed(rng, 74)).collect(),
+        seed_whir: seed(rng, shape.pattern_len),
+        seed_batching: seed(rng, 54),
+        seed_initial_sumcheck: seed(rng, 37),
+        seed_final_sumcheck: seed(rng, 37),
         root: (0..8).map(|_| field(rng)).collect(),
         initial_ood_answers: (0..cfg.commitment_ood_samples).map(|_| ef(rng)).collect(),
         openings: shape.openings.iter().map(|&n| (0..n).map(|_| ef(rng)).collect()).collect(),
@@ -146,6 +157,7 @@ fn synthetic(rng: &mut ChaCha20Rng, cfg: &TranscriptConfig, shape: &Shape) -> Tr
                 root: (0..8).map(|_| field(rng)).collect(),
                 ood_answers: (0..r.ood_samples).map(|_| ef(rng)).collect(),
                 pow_witness: field(rng),
+                seed_sumcheck: seed(rng, 37),
                 sumcheck: sumcheck(rng, r.folding),
             })
             .collect(),
@@ -178,13 +190,14 @@ fn script_transcript_reaches_the_reference_state() {
         let got = run(harness(&emitter.stream, body.clone()));
         assert_eq!(got, emitter.state().to_vec(), "{name}: final sponge state");
 
-        let draws = challenges.rounds.iter().map(|r| r.draws).sum::<usize>() + challenges.final_draws;
+        let queries =
+            challenges.rounds.iter().map(|r| r.queries.len()).sum::<usize>() + challenges.final_queries.len();
         eprintln!(
-            "{name}: {} permutations, {} bytes, stream {} elements, {} query draws, pow ok {}",
+            "{name}: {} permutations, {} bytes, stream {} elements, {} queries, pow ok {}",
             emitter.permutations,
             body.len(),
             emitter.stream.len(),
-            draws,
+            queries,
             challenges.pow_ok
         );
     }
@@ -198,8 +211,9 @@ fn a_wrong_expected_draw_fails_the_script() {
     let data = synthetic(&mut rng, &cfg, &shape);
     let (emitter, _) = transcript::transcript(&cfg, &data, Mode::Check);
 
-    // The first draw follows the pattern and the root.
-    let first_draw = shape.pattern_len + 8;
+    // The first draw follows the commitment seed, the root and the first
+    // virtual claim's seed.
+    let first_draw = 35 + 8 + 54;
     let mut stream = emitter.stream.clone();
     stream[first_draw] = (stream[first_draw] + 1) % poseidon2::constants::P;
 

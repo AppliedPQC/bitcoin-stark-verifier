@@ -8,8 +8,8 @@
 //! distinct), and the openings' shape is the proof's, so the script is
 //! specific to the proof it verifies. What it must not do is trust the proof:
 //! every challenge is drawn from the script's own sponge, every opened row is
-//! hashed and walked to the committed root, every rejection and duplicate in
-//! the query draws is checked, and the closing identity is computed in full.
+//! hashed and walked to the committed root, every rejected query draw is
+//! checked to be one, and the closing identity is computed in full.
 //!
 //! # Stack
 //!
@@ -259,11 +259,23 @@ impl Builder {
         self.bury(4)
     }
 
-    /// The draw checks of one query block: every draw below the rejection
-    /// threshold is masked to an index; an index equal to an earlier one is
-    /// a duplicate; the rest are the queries. Returns them in ascending order.
+    /// The draw checks of one query block: every sample below the rejection
+    /// threshold is masked to an index and kept, in draw order, duplicates
+    /// and all; one at or above it is verified to be and skipped. When the
+    /// domain is no larger than the query count there are no draws and the
+    /// queries are every position.
     fn query_draws(&mut self, draws: &[usize], bits: usize, num_queries: usize) -> Vec<Query> {
         assert!(bits <= reference::MAX_SINGLE_SAMPLE_BITS, "one draw per index");
+        if num_queries >= 1 << bits {
+            assert!(draws.is_empty());
+            return (0..1u32 << bits)
+                .map(|index| {
+                    self.emit(script! { { index } });
+                    self.temps += 1;
+                    Query { index, entry: self.bury(1) }
+                })
+                .collect();
+        }
         let m = (poseidon2::constants::P >> bits) << bits;
         let mask = (1u32 << bits) - 1;
         let mut accepted: Vec<Query> = Vec::new();
@@ -282,32 +294,10 @@ impl Builder {
                 for i in 0..bits { OP_FROMALTSTACK OP_IF { 1u32 << i } OP_ADD OP_ENDIF }
             });
             let index = v & mask;
-            if accepted.iter().any(|q| q.index == index) {
-                self.emit(script! { 0 });
-                self.temps += 1;
-                for q in &accepted {
-                    self.emit(script! { OP_OVER });
-                    self.temps += 1;
-                    self.push_kept(q.entry, 1);
-                    self.emit(script! { OP_EQUAL OP_BOOLOR });
-                    self.temps -= 2;
-                }
-                self.emit(script! { OP_VERIFY OP_DROP });
-                self.temps -= 2;
-                continue;
-            }
-            for q in &accepted {
-                self.emit(script! { OP_DUP });
-                self.temps += 1;
-                self.push_kept(q.entry, 1);
-                self.emit(script! { OP_EQUAL OP_NOT OP_VERIFY });
-                self.temps -= 2;
-            }
             let entry = self.bury(1);
             accepted.push(Query { index, entry });
         }
-        assert_eq!(accepted.len(), num_queries.min(1 << bits), "query count");
-        accepted.sort_by_key(|q| q.index);
+        assert_eq!(accepted.len(), num_queries, "query count");
         accepted
     }
 
@@ -398,18 +388,14 @@ impl Builder {
         (folds, points)
     }
 
-    /// `claim <- claim + sum_i gamma^i y_i` over the OOD answers (data) then
-    /// the folds (kept), Plonky3's `combine_evals` for `[Eq, Select]`.
+    /// `claim <- claim + sum_i gamma^(i+1) y_i` over the OOD answers (data)
+    /// then the folds (kept): Plonky3's `combine_evals` for a constraint made
+    /// `with_existing_claim`, which is exactly `combine_answers`.
     fn combine(&mut self, claim: usize, gamma: usize, ood: &[usize], folds: &[usize]) -> usize {
-        // `combine_answers` starts its powers at gamma^1, so the first answer
-        // joins the base directly.
         self.push_kept(claim, 4);
-        let (first, rest) = ood.split_first().expect("a round has an OOD answer");
-        self.push_data(*first, 4);
-        self.ef_add();
         self.push_kept(gamma, 4);
-        let t = rest.len() + folds.len();
-        for &e in rest {
+        let t = ood.len() + folds.len();
+        for &e in ood {
             self.push_data(e, 4);
             self.emit(ext4::to_altstack());
             self.temps -= 4;
@@ -504,23 +490,21 @@ impl Sponge for Builder {
 }
 
 /// The kept entries one query block consumed: `stir_queries` replayed on the
-/// recorded samples, since a draw above the rejection threshold costs a
-/// further sample and `Challenges` counts draws, not samples.
+/// recorded samples, since a sample at or above the rejection threshold costs
+/// a further one and the shape counts draws, not samples.
 fn draw_block(samples: &[u32], k: &mut usize, bits: usize, num_queries: usize) -> Vec<usize> {
+    if num_queries >= 1 << bits {
+        return Vec::new();
+    }
     let m = (poseidon2::constants::P >> bits) << bits;
-    let mask = (1u32 << bits) - 1;
-    let target = num_queries.min(1 << bits);
     let mut entries = Vec::new();
-    let mut seen: Vec<u32> = Vec::new();
-    while seen.len() < target {
+    let mut accepted = 0;
+    while accepted < num_queries {
         let v = samples[*k];
         entries.push(*k);
         *k += 1;
         if v < m {
-            let q = v & mask;
-            if !seen.contains(&q) {
-                seen.push(q);
-            }
+            accepted += 1;
         }
     }
     entries
@@ -542,19 +526,23 @@ fn kept(k: &mut usize, n: usize) -> usize {
 fn layout(cfg: &VerifyConfig, data: &VerifyData, ch: &Challenges, samples: &[u32]) -> Layout {
     let t = &cfg.transcript;
     let d = &data.transcript;
-    let mut s = d.pattern.len();
+    let mut s = d.seed_commitment.len();
     let mut k = 0;
     let mut l = Layout::default();
     l.root = stream(&mut s, d.root.len());
-    for _ in 0..d.initial_ood_answers.len() {
+    for seed in &d.seed_virtual {
+        stream(&mut s, seed.len());
         l.k_ood.push(kept(&mut k, 4));
         l.ood_answers.push(stream(&mut s, 4));
     }
-    for evals in &d.openings {
+    for (evals, seed) in d.openings.iter().zip(&d.seed_claim) {
+        stream(&mut s, seed.len());
         l.k_claim.push(kept(&mut k, 4));
         l.evals.push(evals.iter().map(|_| stream(&mut s, 4)).collect());
     }
+    stream(&mut s, d.seed_whir.len() + d.seed_batching.len());
     l.k_alpha = kept(&mut k, 4);
+    stream(&mut s, d.seed_initial_sumcheck.len());
     for _ in 0..d.initial_sumcheck.len() {
         l.initial_sumcheck.push((stream(&mut s, 4), stream(&mut s, 4)));
         l.k_initial_fold.push(kept(&mut k, 4));
@@ -565,9 +553,9 @@ fn layout(cfg: &VerifyConfig, data: &VerifyData, ch: &Challenges, samples: &[u32
             r.k_ood.push(kept(&mut k, 4));
             r.ood_answers.push(stream(&mut s, 4));
         }
-        kept(&mut k, 1); // the checkpoint
         r.k_draws = draw_block(samples, &mut k, rt.domain_bits, rt.num_queries);
         r.k_combination = kept(&mut k, 4);
+        stream(&mut s, rd.seed_sumcheck.len());
         for _ in 0..rd.sumcheck.len() {
             r.sumcheck.push((stream(&mut s, 4), stream(&mut s, 4)));
             r.k_fold.push(kept(&mut k, 4));
@@ -576,6 +564,7 @@ fn layout(cfg: &VerifyConfig, data: &VerifyData, ch: &Challenges, samples: &[u32
     }
     l.final_poly = stream(&mut s, 4 * d.final_poly.len());
     l.k_final_draws = draw_block(samples, &mut k, t.final_domain_bits, t.final_queries);
+    stream(&mut s, d.seed_final_sumcheck.len());
     for _ in 0..d.final_sumcheck.len() {
         l.final_sumcheck.push((stream(&mut s, 4), stream(&mut s, 4)));
         l.k_final_fold.push(kept(&mut k, 4));
@@ -691,7 +680,8 @@ pub fn build(cfg: &VerifyConfig, data: &VerifyData) -> Result<Built, pruned::Err
         Eq { u: usize, m: usize, suffix: Vec<[u32; 4]> },
         Select { z: usize },
     }
-    let mut constraints: Vec<(usize, usize, Vec<W>)> = Vec::new();
+    // (challenge, arity, powers start at 1, weights) per constraint.
+    let mut constraints: Vec<(usize, usize, bool, Vec<W>)> = Vec::new();
     let mut ws = Vec::new();
     for (shape, &u) in cfg.claims.iter().zip(&l.k_claim) {
         for sel in &shape.selectors {
@@ -701,14 +691,14 @@ pub fn build(cfg: &VerifyConfig, data: &VerifyData) -> Result<Built, pruned::Err
     for &u in &l.k_ood {
         ws.push(W::Eq { u, m: cfg.num_variables, suffix: vec![] });
     }
-    constraints.push((l.k_alpha, cfg.num_variables, ws));
+    constraints.push((l.k_alpha, cfg.num_variables, false, ws));
     for (i, rl) in l.rounds.iter().enumerate() {
         let n = cfg.rounds[i].num_variables;
         let mut ws: Vec<W> = rl.k_ood.iter().map(|&u| W::Eq { u, m: n, suffix: vec![] }).collect();
         ws.extend(round_points[i].iter().map(|&z| W::Select { z }));
-        constraints.push((rl.k_combination, n, ws));
+        constraints.push((rl.k_combination, n, true, ws));
     }
-    for (chi, n, ws) in &constraints {
+    for (chi, n, shifted, ws) in &constraints {
         let n = *n;
         assert!(n <= all_fold.len());
         for &r in &all_fold[all_fold.len() - n..] {
@@ -724,6 +714,11 @@ pub fn build(cfg: &VerifyConfig, data: &VerifyData) -> Result<Built, pruned::Err
             b.push_kept(*chi, 4);
             b.ef_mul();
             b.ef_add();
+        }
+        // A round constraint's powers start at chi^1: one more factor.
+        if *shifted {
+            b.push_kept(*chi, 4);
+            b.ef_mul();
         }
         // [total R(n) value] -> [total value] -> [total]
         b.emit(ext4::to_altstack());

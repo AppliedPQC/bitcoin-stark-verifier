@@ -75,7 +75,7 @@ fn derive_under(
         WhirConfig::new(num_variables, params).map_err(|e| format!("{e:?}"))?;
 
     let rounds: Vec<Round> = cfg
-        .round_parameters
+        .round_parameters()
         .iter()
         .map(|r| Round {
             folding_factor: r.folding_factor,
@@ -90,24 +90,24 @@ fn derive_under(
             domain_gen: 7,
         })
         .collect();
-    let last = cfg.round_parameters.last().expect("at least one round");
+    let last = cfg.round_parameters().last().expect("at least one round");
     let final_round = Round {
         folding_factor: 0,
-        num_queries: cfg.final_queries,
+        num_queries: cfg.terminal().num_queries,
         log_domain_size: last.domain_size.trailing_zeros() as usize - last.folding_factor,
         ood_samples: 0,
         row_len: 4 * (1 << last.folding_factor),
         domain_gen: 7,
     };
-    let queries: Vec<usize> = cfg.round_parameters.iter().map(|r| r.num_queries).collect();
+    let queries: Vec<usize> = cfg.round_parameters().iter().map(|r| r.num_queries).collect();
     Ok((
         Config {
-            initial_folding_factor: cfg.folding_schedule[0],
-            initial_ood_samples: cfg.commitment_ood_samples,
+            initial_folding_factor: cfg.folding_schedule()[0],
+            initial_ood_samples: cfg.commitment_ood_samples(),
             rounds,
             final_round,
-            final_sumcheck_rounds: cfg.final_sumcheck_rounds,
-            final_poly_vars: cfg.final_sumcheck_rounds,
+            final_sumcheck_rounds: cfg.final_sumcheck_rounds(),
+            final_poly_vars: cfg.final_sumcheck_rounds(),
         },
         queries,
     ))

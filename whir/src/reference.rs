@@ -310,19 +310,27 @@ pub fn closing_sum(evals: &[[u32; 4]], points: &[([u32; 4], Vec<[u32; 4]>)]) -> 
 // to observe and sample (the reference sponge, a log of Plonky3's own calls,
 // a script) can be driven through the same schedule.
 //
+// Plonky3 0.7 layers its transcript: the commitment, each out-of-domain
+// virtual claim, each opening claim, the WHIR run, the batching draw and
+// every sumcheck delegate run as their own sub-transcript, and each *seeds*
+// the sponge with its domain separator (a constant of the configuration)
+// before its first interaction. Those seeds are inputs here; the test bed
+// reads them off a logged run and cross-checks the WHIR one against the API.
+//
 // The order, per `WhirVerifier::verify` and the PCS adapter around it:
 //
-//   1. the domain-separator pattern, then the commitment root
-//   2. per commitment OOD sample: draw the point, absorb the answer
-//   3. per opening claim: draw the point, absorb the evaluations
-//   4. draw the batching randomness
-//   5. the initial sumcheck: per round absorb `[c0, c_inf]`, PoW, draw
+//   1. the commitment seed, then the root
+//   2. per commitment OOD sample: its seed, draw the point, absorb the answer
+//   3. per opening claim: its seed, draw the point, absorb the evaluations
+//   4. the WHIR seed, the batching seed, draw the batching randomness
+//   5. the initial sumcheck: its seed, then per round absorb `[c0, c_inf]`,
+//      PoW, draw
 //   6. per intermediate round: absorb the root; per OOD draw and absorb;
-//      PoW; one *base* sample as a checkpoint; the STIR queries by uniform
-//      rejection until `num_queries` are distinct; draw the combination
-//      randomness; the round's sumcheck as in 5
-//   7. absorb the final polynomial; PoW; the final STIR queries (no
-//      checkpoint); the final sumcheck as in 5
+//      PoW; the STIR queries, a fixed `num_queries` uniform draws (every
+//      position when the domain is no larger), duplicates kept, in draw
+//      order; draw the combination randomness; the round's sumcheck as in 5
+//   7. absorb the final polynomial; PoW; the final STIR queries; the final
+//      sumcheck as in 5
 // ---------------------------------------------------------------------------
 
 /// What a transcript needs of its challenger: the two primitives every
@@ -443,13 +451,24 @@ pub struct RoundData {
     pub root: Vec<u32>,
     pub ood_answers: Vec<[u32; 4]>,
     pub pow_witness: u32,
+    /// The round's sumcheck delegate's seed.
+    pub seed_sumcheck: Vec<u32>,
     pub sumcheck: Vec<SumcheckRoundData>,
 }
 
-/// Everything the prover sends that the transcript absorbs.
+/// Everything the transcript absorbs: the sub-transcripts' seeds (constants
+/// of the configuration) and the prover's messages.
 #[derive(Clone, Debug)]
 pub struct TranscriptData {
-    pub pattern: Vec<u32>,
+    pub seed_commitment: Vec<u32>,
+    /// One per commitment OOD sample.
+    pub seed_virtual: Vec<Vec<u32>>,
+    /// One per opening claim.
+    pub seed_claim: Vec<Vec<u32>>,
+    pub seed_whir: Vec<u32>,
+    pub seed_batching: Vec<u32>,
+    pub seed_initial_sumcheck: Vec<u32>,
+    pub seed_final_sumcheck: Vec<u32>,
     pub root: Vec<u32>,
     pub initial_ood_answers: Vec<[u32; 4]>,
     /// Per opening claim, the evaluations in the order they are absorbed.
@@ -465,11 +484,8 @@ pub struct TranscriptData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoundChallenges {
     pub ood_points: Vec<[u32; 4]>,
-    pub checkpoint: u32,
-    /// Distinct, ascending, as the verifier consumes them.
+    /// In draw order, duplicates kept, as the verifier consumes them.
     pub queries: Vec<u32>,
-    /// Draws it took, duplicates included.
-    pub draws: usize,
     pub combination: [u32; 4],
     pub folding: Vec<[u32; 4]>,
 }
@@ -483,7 +499,6 @@ pub struct Challenges {
     pub initial_folding: Vec<[u32; 4]>,
     pub rounds: Vec<RoundChallenges>,
     pub final_queries: Vec<u32>,
-    pub final_draws: usize,
     pub final_folding: Vec<[u32; 4]>,
     /// Whether every PoW witness passed.
     pub pow_ok: bool,
@@ -509,53 +524,52 @@ fn sumcheck_rounds<S: Sponge>(
         .collect()
 }
 
-/// `get_challenge_stir_queries`: uniform `bits`-bit draws until `num_queries`
-/// distinct indices (capped at the domain), returned ascending, with the
-/// number of draws that took.
-fn stir_queries<S: Sponge>(s: &mut S, bits: usize, num_queries: usize) -> (Vec<u32>, usize) {
-    let target = num_queries.min(1 << bits);
-    let mut queries = Vec::with_capacity(target);
-    let mut draws = 0;
-    while queries.len() < target {
-        let q = s.sample_uniform_bits(bits);
-        draws += 1;
-        if !queries.contains(&q) {
-            queries.push(q);
-        }
+/// `assemble_query_indices` for a non-stratified domain: `num_queries`
+/// uniform `bits`-bit draws in draw order, duplicates kept; every position,
+/// with no draw at all, when the domain is no larger than that.
+pub fn stir_queries<S: Sponge>(s: &mut S, bits: usize, num_queries: usize) -> Vec<u32> {
+    if num_queries >= 1 << bits {
+        return (0..1u32 << bits).collect();
     }
-    queries.sort_unstable();
-    (queries, draws)
+    (0..num_queries).map(|_| s.sample_uniform_bits(bits)).collect()
 }
 
 /// Drive `s` through the verifier's transcript and collect what it draws.
 pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &mut S) -> Challenges {
     let mut pow_ok = true;
+    let observe_all = |s: &mut S, values: &[u32]| {
+        for &v in values {
+            s.observe(v);
+        }
+    };
 
-    // 1. Pattern, then the commitment.
-    for &v in &data.pattern {
-        s.observe(v);
-    }
-    for &v in &data.root {
-        s.observe(v);
-    }
+    // 1. The commitment's seed, then the root.
+    observe_all(s, &data.seed_commitment);
+    observe_all(s, &data.root);
 
-    // 2. Commitment OOD samples.
+    // 2. Commitment OOD samples, each its own seeded sub-transcript.
     assert_eq!(data.initial_ood_answers.len(), cfg.commitment_ood_samples);
+    assert_eq!(data.seed_virtual.len(), data.initial_ood_answers.len(), "one seed per OOD claim");
     let initial_ood_points = data
         .initial_ood_answers
         .iter()
-        .map(|answer| {
+        .zip(&data.seed_virtual)
+        .map(|(answer, seed)| {
+            observe_all(s, seed);
             let point = s.sample_ef();
             s.observe_ef(answer);
             point
         })
         .collect();
 
-    // 3. Opening claims.
+    // 3. Opening claims, likewise.
+    assert_eq!(data.seed_claim.len(), data.openings.len(), "one seed per opening claim");
     let opening_points = data
         .openings
         .iter()
-        .map(|evals| {
+        .zip(&data.seed_claim)
+        .map(|(evals, seed)| {
+            observe_all(s, seed);
             let point = s.sample_ef();
             for e in evals {
                 s.observe_ef(e);
@@ -564,10 +578,13 @@ pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &
         })
         .collect();
 
-    // 4. Batching.
+    // 4. The WHIR run's seed, then the batching draw's.
+    observe_all(s, &data.seed_whir);
+    observe_all(s, &data.seed_batching);
     let alpha = s.sample_ef();
 
     // 5. Initial sumcheck.
+    observe_all(s, &data.seed_initial_sumcheck);
     let initial_folding = sumcheck_rounds(
         s,
         &data.initial_sumcheck,
@@ -597,12 +614,12 @@ pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &
                 })
                 .collect();
             pow_ok &= s.check_witness(rc.pow_bits, rd.pow_witness);
-            let checkpoint = s.sample();
-            let (queries, draws) = stir_queries(s, rc.domain_bits, rc.num_queries);
+            let queries = stir_queries(s, rc.domain_bits, rc.num_queries);
             let combination = s.sample_ef();
+            observe_all(s, &rd.seed_sumcheck);
             let folding =
                 sumcheck_rounds(s, &rd.sumcheck, rc.folding, rc.folding_pow_bits, &mut pow_ok);
-            RoundChallenges { ood_points, checkpoint, queries, draws, combination, folding }
+            RoundChallenges { ood_points, queries, combination, folding }
         })
         .collect();
 
@@ -611,7 +628,8 @@ pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &
         s.observe_ef(e);
     }
     pow_ok &= s.check_witness(cfg.final_pow_bits, data.final_pow_witness);
-    let (final_queries, final_draws) = stir_queries(s, cfg.final_domain_bits, cfg.final_queries);
+    let final_queries = stir_queries(s, cfg.final_domain_bits, cfg.final_queries);
+    observe_all(s, &data.seed_final_sumcheck);
     let final_folding = sumcheck_rounds(
         s,
         &data.final_sumcheck,
@@ -627,7 +645,6 @@ pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &
         initial_folding,
         rounds,
         final_queries,
-        final_draws,
         final_folding,
         pow_ok,
     }
@@ -653,7 +670,10 @@ pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &
 //      folds to `eval_multilinear(row, previous folding randomness)`, the query
 //      index `q` becomes the point `z = g^q`; a new constraint
 //      `[Eq(ood), Select(z, folds)]` with challenge `gamma` is combined into
-//      the claim, then the round's sumcheck runs.
+//      the claim -- its powers start at `gamma^1`, the existing claim being
+//      the `gamma^0` term (`Constraint::new_with_existing_claim`), which is
+//      the paper's `sigma = claim + gamma*y_0 + sum gamma^(j+1) g(z_j)` --
+//      then the round's sumcheck runs.
 //   4. Final: the last commitment's rows fold likewise and must equal the
 //      final polynomial's Horner evaluation at `z`; the final sumcheck runs;
 //      with `R` the concatenation of all folding randomness, the weights
@@ -746,11 +766,13 @@ enum Statement {
     Select(Vec<u32>),
 }
 
-/// A batched constraint: its challenge, arity and statements in power order.
+/// A batched constraint: its challenge, arity and statements in power order,
+/// the powers starting at `challenge^initial_power`.
 #[derive(Clone, Debug)]
 struct Constraint {
     challenge: [u32; 4],
     num_variables: usize,
+    initial_power: usize,
     statements: Vec<Statement>,
 }
 
@@ -867,7 +889,7 @@ fn weights(constraints: &[Constraint], randomness: &[[u32; 4]]) -> [u32; 4] {
     for c in constraints {
         assert!(c.num_variables <= randomness.len());
         let local = &randomness[randomness.len() - c.num_variables..];
-        let mut shift = 0;
+        let mut shift = c.initial_power;
         for s in &c.statements {
             let ws: Vec<[u32; 4]> = match s {
                 Statement::Eq(points) => points.iter().map(|p| eq_eval(p, local)).collect(),
@@ -930,6 +952,7 @@ pub fn verify(cfg: &VerifyConfig, data: &VerifyData) -> Result<Verified, VerifyE
     let mut constraints = vec![Constraint {
         challenge: ch.alpha,
         num_variables: cfg.num_variables,
+        initial_power: 0,
         statements,
     }];
 
@@ -952,11 +975,12 @@ pub fn verify(cfg: &VerifyConfig, data: &VerifyData) -> Result<Verified, VerifyE
         let ood: Vec<Vec<[u32; 4]>> =
             rc.ood_points.iter().map(|&y| expand_univariate(y, rm.num_variables)).collect();
         let rd = &data.transcript.rounds[i];
-        combine_into(&mut claimed, rc.combination, 0, &rd.ood_answers);
-        combine_into(&mut claimed, rc.combination, rd.ood_answers.len(), &folds);
+        combine_into(&mut claimed, rc.combination, 1, &rd.ood_answers);
+        combine_into(&mut claimed, rc.combination, 1 + rd.ood_answers.len(), &folds);
         constraints.push(Constraint {
             challenge: rc.combination,
             num_variables: rm.num_variables,
+            initial_power: 1,
             statements: vec![Statement::Eq(ood), Statement::Select(points)],
         });
         for (round, &r) in rd.sumcheck.iter().zip(&rc.folding) {

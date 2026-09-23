@@ -102,8 +102,17 @@ closing identity — and the test executes it.
 
 | proof | script | peak stack | transcript permutations |
 |---|---|---|---|
-| 6 variables, no intermediate round | 172.9 MB | 2,652 | 37 |
-| 8 variables, one intermediate round | 312.8 MB | 4,616 | 44 |
+| 6 variables, no intermediate round | 198.1 MB | 2,990 | 81 |
+| 8 variables, one intermediate round | 340.9 MB | 4,998 | 93 |
+
+These are against Plonky3 0.7, whose transcript is layered: the commitment,
+each out-of-domain claim, each opening claim, the WHIR run, the batching draw
+and every sumcheck delegate seed the sponge with their own domain separator
+(a constant of the configuration) before their first interaction, and the
+STIR queries are a fixed `num_queries` draws with duplicates kept. The seeds
+are what the extra permutations pay for; the test bed reads them off a logged
+run of Plonky3's verifier and cross-checks the WHIR one against
+`WhirShape::domain_separator`.
 
 A wrong final domain generator, a changed opened row and a changed final
 polynomial are each rejected.
