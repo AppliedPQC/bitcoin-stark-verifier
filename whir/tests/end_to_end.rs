@@ -11,7 +11,10 @@
 //! chose to send.
 
 use bitcoin_script::{define_pushable, script};
-use p3_challenger::DuplexChallenger;
+use p3_challenger::{
+    CanObserve, CanSample, CanSampleBits, CanSampleUniformBits, DuplexChallenger, FieldChallenger,
+    GrindingChallenger, ResamplingError, UniformSamplingField,
+};
 use p3_commit::MultilinearPcs;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::extension::BinomialExtensionField;
@@ -21,7 +24,7 @@ use p3_merkle_tree::MerkleTreeMmcs;
 use p3_sumcheck::layout::{Layout, PrefixProver};
 use p3_sumcheck::layout::Table;
 use p3_sumcheck::{OpeningProtocol, OpeningRequest, TableShape, TableSpec};
-use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
+use p3_symmetric::{MerkleCap, PaddingFreeSponge, TruncatedPermutation};
 use p3_whir::fiat_shamir::domain_separator::DomainSeparator;
 use p3_whir::parameters::{FoldingFactor, ProtocolParameters, SecurityAssumption, WhirConfig};
 use p3_whir::pcs::prover::WhirProver;
@@ -81,7 +84,6 @@ fn round_log_inv_rates(num_variables: usize, ff: &FoldingFactor) -> Vec<usize> {
     rates
 }
 
-/// Produce a real WHIR proof over KoalaBear with Plonky3's prover.
 thread_local! {
     static SECURITY_LEVEL: core::cell::RefCell<usize> = const { core::cell::RefCell::new(32) };
     static RATE_LOG: core::cell::RefCell<usize> = const { core::cell::RefCell::new(1) };
@@ -89,7 +91,34 @@ thread_local! {
 
 type Commit = <MyMmcs as p3_commit::Mmcs<F>>::Commitment;
 
-fn prove() -> (Commit, p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>) {
+type Proof = p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>;
+
+/// The protocol parameters every prover and verifier in this file agrees on.
+///
+/// Built from `num_variables` alone so a second party (a differently typed
+/// verifier, say) can derive the identical `WhirConfig` without being handed
+/// the first party's.
+fn params(num_variables: usize) -> ProtocolParameters {
+    let folding_factor = FoldingFactor::Constant(2);
+    ProtocolParameters {
+        security_level: SECURITY_LEVEL.with(|v| *v.borrow()),
+        pow_bits: 0,
+        round_log_inv_rates: round_log_inv_rates(num_variables, &folding_factor),
+        folding_factor,
+        soundness_type: SecurityAssumption::CapacityBound,
+        starting_log_inv_rate: RATE_LOG.with(|v| *v.borrow()),
+    }
+}
+
+/// Produce a real WHIR proof over KoalaBear with Plonky3's prover.
+fn prove() -> (Commit, Proof) {
+    let (commitment, proof, _, _) = prove_full();
+    (commitment, proof)
+}
+
+/// `prove`, also returning what a second verifier needs to rebuild the
+/// configuration: the padded variable count and the opening protocol.
+fn prove_full() -> (Commit, Proof, usize, OpeningProtocol) {
     let folding_factor = FoldingFactor::Constant(2);
     let folding = folding_factor.at_round(0);
 
@@ -113,15 +142,7 @@ fn prove() -> (Commit, p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>) {
     let perm = default_koalabear_poseidon2_16();
     let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
 
-    let params = ProtocolParameters {
-        security_level: SECURITY_LEVEL.with(|v| *v.borrow()),
-        pow_bits: 0,
-        round_log_inv_rates: round_log_inv_rates(num_variables, &folding_factor),
-        folding_factor,
-        soundness_type: SecurityAssumption::CapacityBound,
-        starting_log_inv_rate: RATE_LOG.with(|v| *v.borrow()),
-    };
-    let config = WhirConfig::new(num_variables, params).expect("config");
+    let config = WhirConfig::new(num_variables, params(num_variables)).expect("config");
     let pcs = Pcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
 
     // Prove.
@@ -151,11 +172,11 @@ fn prove() -> (Commit, p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>) {
     pcs.add_domain_separator::<8>(&mut ds);
     ds.observe_domain_separator(&mut ch);
     <Pcs<PrefixProver<F, EF>> as MultilinearPcs<EF, MyChallenger>>::verify(
-        &pcs, &commitment, &proof, &mut ch, protocol,
+        &pcs, &commitment, &proof, &mut ch, protocol.clone(),
     )
     .expect("Plonky3's own verifier must accept the proof before any script sees it");
 
-    (commitment, proof)
+    (commitment, proof, num_variables, protocol)
 }
 
 /// Produce a real WHIR proof and re-derive its initial sumcheck claim in script.
@@ -704,4 +725,195 @@ fn script_leaf_hash_agrees_with_plonky3_on_a_real_row() {
 /// Named so the test above reads as three independent computations.
 fn reference_hash_row(row: &[u32]) -> Vec<u32> {
     poseidon2::reference::hash_row(row).to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// The transcript Plonky3's verifier actually runs, replayed on the reference.
+//
+// `DomainSeparator` *declares* an observe/sample pattern; what matters to a
+// script re-deriving the challenges is the sequence the verifier *executes*.
+// Every sampler Plonky3 exposes (`sample_algebra_element`, `sample_bits`,
+// `sample_uniform_bits`, `check_witness`) is a trait default over one
+// primitive `sample()`, and every observer bottoms out in `observe(F)`. So a
+// challenger that logs those two primitives and forwards them to the real
+// `DuplexChallenger` records the verifier's whole schedule, values included.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Op {
+    Observe(u32),
+    Sample(u32),
+}
+
+/// `DuplexChallenger` with every primitive `observe`/`sample` logged.
+#[derive(Clone)]
+struct Logger {
+    inner: MyChallenger,
+    log: Vec<Op>,
+}
+
+impl Logger {
+    fn new() -> Self {
+        Self { inner: challenger(), log: Vec::new() }
+    }
+
+    /// `BitSamplingStrategy::sample_value` with `RESAMPLE = true`: draw until
+    /// the field element falls below `m`, through the logged primitive.
+    fn draw_below(&mut self, m: u64) -> u64 {
+        loop {
+            let f: F = self.sample();
+            let v = u64::from(f.as_canonical_u32());
+            if v < m {
+                return v;
+            }
+        }
+    }
+
+    /// The low `bits` bits of a draw uniform on `[0, m_bits)`.
+    fn uniform_chunk(&mut self, bits: usize) -> usize {
+        let m = <F as UniformSamplingField>::SAMPLING_BITS_M[bits];
+        (self.draw_below(m) as usize) & ((1usize << bits) - 1)
+    }
+}
+
+impl CanObserve<F> for Logger {
+    fn observe(&mut self, value: F) {
+        self.log.push(Op::Observe(value.as_canonical_u32()));
+        self.inner.observe(value);
+    }
+}
+
+/// The commitment is a Merkle cap; `DuplexChallenger` absorbs it root by
+/// root, element by element. Named concretely (not through `Commit`): the
+/// alias is a projection, and coherence cannot tell a projection from `F`.
+impl CanObserve<MerkleCap<F, [F; 8]>> for Logger {
+    fn observe(&mut self, cap: MerkleCap<F, [F; 8]>) {
+        for digest in cap.roots() {
+            for value in digest {
+                self.observe(*value);
+            }
+        }
+    }
+}
+
+impl CanSample<F> for Logger {
+    fn sample(&mut self) -> F {
+        let value: F = self.inner.sample();
+        self.log.push(Op::Sample(value.as_canonical_u32()));
+        value
+    }
+}
+
+impl CanSampleBits<usize> for Logger {
+    /// `DuplexChallenger::sample_bits`: one field sample, low bits kept.
+    fn sample_bits(&mut self, bits: usize) -> usize {
+        let f: F = self.sample();
+        (f.as_canonical_u32() as usize) & ((1usize << bits) - 1)
+    }
+}
+
+impl CanSampleUniformBits<F> for Logger {
+    /// `DuplexChallenger::sample_uniform_bits_with_strategy`, over the logged
+    /// primitive. Only the resampling strategy is reachable from the verifier
+    /// (`get_challenge_stir_queries` passes `RESAMPLE = true`), and
+    /// `ResamplingError` has no public constructor, so the other arm is a bug.
+    fn sample_uniform_bits<const RESAMPLE: bool>(
+        &mut self,
+        bits: usize,
+    ) -> Result<usize, ResamplingError> {
+        assert!(RESAMPLE, "the WHIR verifier only ever resamples");
+        if bits == 0 {
+            return Ok(0);
+        }
+        Ok(if bits <= <F as UniformSamplingField>::MAX_SINGLE_SAMPLE_BITS {
+            self.uniform_chunk(bits)
+        } else {
+            let half1 = bits / 2;
+            let half2 = bits - half1;
+            let chunk1 = self.uniform_chunk(half1);
+            let chunk2 = self.uniform_chunk(half2);
+            chunk1 | (chunk2 << half1)
+        })
+    }
+}
+
+impl FieldChallenger<F> for Logger {}
+
+impl GrindingChallenger for Logger {
+    type Witness = F;
+
+    /// Prover-side only; `check_witness` is the trait default over
+    /// `observe` + `sample_bits`, both logged.
+    fn grind(&mut self, _bits: usize) -> F {
+        unreachable!("the logger only stands in for a verifier")
+    }
+}
+
+type LogPcs<L> = WhirProver<EF, F, MyDft, MyMmcs, Logger, L>;
+
+/// The log as runs, `O<n>` observes then `S<n>` samples, for reading.
+fn runs(log: &[Op]) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < log.len() {
+        let observing = matches!(log[i], Op::Observe(_));
+        let start = i;
+        while i < log.len() && matches!(log[i], Op::Observe(_)) == observing {
+            i += 1;
+        }
+        out.push(format!("{}{}", if observing { 'O' } else { 'S' }, i - start));
+    }
+    out.join(" ")
+}
+
+/// Plonky3's verifier, run through the logger on a real proof, and every
+/// challenge it drew re-derived by `reference::Challenger` from the same
+/// observations. Establishes that the reference sponge plus the *executed*
+/// schedule reproduces Plonky3, which is what a script transcript must do.
+#[test]
+fn plonky3_verifier_transcript_replays_on_the_reference_challenger() {
+    let (commitment, proof, num_variables, protocol) = prove_full();
+
+    // A verifier typed on the logger. Same parameters, so the same config.
+    let perm = default_koalabear_poseidon2_16();
+    let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
+    let config =
+        WhirConfig::<EF, F, Logger>::new(num_variables, params(num_variables)).expect("config");
+    let pcs = LogPcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
+
+    let mut ch = Logger::new();
+    let mut ds = DomainSeparator::new(vec![]);
+    pcs.add_domain_separator::<8>(&mut ds);
+    ds.observe_domain_separator(&mut ch);
+    <LogPcs<PrefixProver<F, EF>> as MultilinearPcs<EF, Logger>>::verify(
+        &pcs, &commitment, &proof, &mut ch, protocol,
+    )
+    .expect("the logged verifier is the real one and must accept the proof");
+
+    // Replay: feed the reference the same observations, demand the same draws.
+    let mut reference = reference::Challenger::new();
+    let (mut observed, mut sampled) = (0usize, 0usize);
+    for (i, op) in ch.log.iter().enumerate() {
+        match *op {
+            Op::Observe(v) => {
+                reference.observe(v);
+                observed += 1;
+            }
+            Op::Sample(v) => {
+                sampled += 1;
+                assert_eq!(reference.sample(), v, "challenge {sampled} (transcript op {i}) diverged");
+            }
+        }
+    }
+    assert!(sampled > 0, "the verifier drew no challenges");
+    assert_eq!(
+        reference.state(),
+        ch.inner.sponge_state.map(|x| x.as_canonical_u32()),
+        "sponge states differ after the full transcript"
+    );
+    eprintln!(
+        "transcript: {observed} observes, {sampled} samples over {} ops\nschedule: {}",
+        ch.log.len(),
+        runs(&ch.log)
+    );
 }
