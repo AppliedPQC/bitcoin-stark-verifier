@@ -550,8 +550,8 @@ fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
 #[test]
 fn streaming_garbler_builds_verifies_and_scales() {
     for (num_vars, rate, term_bits) in [(8usize, 3usize, 110usize), (12, 3, 110)] {
-        streaming_case(num_vars, rate, term_bits, Some(0));
-        streaming_case(num_vars, rate, term_bits, None);
+        streaming_case(num_vars, rate, 4, term_bits, Some(0));
+        streaming_case(num_vars, rate, 4, term_bits, None);
     }
 }
 
@@ -561,18 +561,20 @@ fn streaming_garbler_builds_verifies_and_scales() {
 #[test]
 #[ignore]
 fn streaming_garbler_on_the_2_18_schedule() {
-    // `WHIR_GC_CAP=<height>` overrides Plonky3's recommended cap height.
-    let cap = std::env::var("WHIR_GC_CAP").ok().map(|s| s.parse().expect("a cap height"));
-    streaming_case(18, 5, 110, cap);
+    // `WHIR_GC_CAP=<height>` overrides Plonky3's recommended cap height;
+    // `WHIR_GC_RATE=<log inverse rate>` and `WHIR_GC_FOLDING=<factor>` the
+    // rate 1/32 and folding 4.
+    let env = |name: &str| std::env::var(name).ok().map(|s| s.parse::<usize>().expect("a number"));
+    streaming_case(18, env("WHIR_GC_RATE").unwrap_or(5), env("WHIR_GC_FOLDING").unwrap_or(4), 110, env("WHIR_GC_CAP"));
 }
 
 /// One proof through plan and streamed garbling, with a single root
 /// (`Some(0)`) or Plonky3's recommended Merkle cap (`None`).
-fn streaming_case(num_vars: usize, rate: usize, term_bits: usize, cap_height: Option<usize>) {
+fn streaming_case(num_vars: usize, rate: usize, folding: usize, term_bits: usize, cap_height: Option<usize>) {
     use whir_gc::stream::{Plan, Streaming};
     {
         let t = std::time::Instant::now();
-        let run = prove_and_log(num_vars, rate, 4, term_bits, cap_height);
+        let run = prove_and_log(num_vars, rate, folding, term_bits, cap_height);
         let prove_time = t.elapsed();
         let (cfg, data) = inputs(&run);
         drop(run);
@@ -602,7 +604,7 @@ fn streaming_case(num_vars: usize, rate: usize, term_bits: usize, cap_height: Op
         assert_eq!((plan_counts.direct_and, plan_counts.direct_or, plan_counts.direct_xor), (counts.direct_and, counts.direct_or, counts.direct_xor));
         assert_eq!(plan_wires, s.wires());
         eprintln!(
-            "{num_vars} vars, rate 1/{}, terminal security {term_bits}, cap of {cap}: queries {:?} + final {}; proved in {:.1?}; {} non-free gates ({} AND, {} OR), {} XOR, {} wires, {} inputs; planned in {:.1?}; garbled {} MB in {:.1?} with {} live slots at peak",
+            "{num_vars} vars, rate 1/{}, folding {folding}, terminal security {term_bits}, cap of {cap}: queries {:?} + final {}; proved in {:.1?}; {} non-free gates ({} AND, {} OR), {} XOR, {} wires, {} inputs; planned in {:.1?}; garbled {} MB in {:.1?} with {} live slots at peak",
             1 << rate,
             ok.challenges.rounds.iter().map(|r| r.queries.len()).collect::<Vec<_>>(),
             ok.challenges.final_queries.len(),
@@ -618,6 +620,8 @@ fn streaming_case(num_vars: usize, rate: usize, term_bits: usize, cap_height: Op
             build_time,
             s.peak_live(),
         );
+        assert_eq!(shape.profile.total(), s.non_free_gates(), "the profile accounts for every non-free gate");
+        eprintln!("{}", shape.profile);
 
         if num_vars < 18 && cap == 1 {
             // Against the stored-gate build (`circuit_accepts_real_proofs_and_rejects_a_flipped_bit`,

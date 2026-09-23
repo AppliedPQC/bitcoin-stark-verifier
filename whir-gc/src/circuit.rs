@@ -614,6 +614,46 @@ fn transcript<T: CircuitTrait>(b: &mut T, inputs: &Inputs, cfg: &Config, d: &Dat
 // The openings on wires.
 // ---------------------------------------------------------------------------
 
+/// Non-free gates by phase: where the circuit's size goes. Names repeat
+/// across rounds and are summed.
+#[derive(Default, Clone, Debug)]
+pub struct Profile {
+    pub phases: Vec<(&'static str, usize)>,
+    last: usize,
+}
+
+impl Profile {
+    fn non_free<T: CircuitTrait>(b: &T) -> usize {
+        let c = b.gate_counts();
+        c.direct_and + c.direct_or
+    }
+
+    /// Charge the non-free gates since the last mark to `name`.
+    fn mark<T: CircuitTrait>(&mut self, b: &T, name: &'static str) {
+        let now = Self::non_free(b);
+        let delta = now - self.last;
+        self.last = now;
+        match self.phases.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, v)) => *v += delta,
+            None => self.phases.push((name, delta)),
+        }
+    }
+
+    pub fn total(&self) -> usize {
+        self.phases.iter().map(|(_, v)| v).sum()
+    }
+}
+
+impl core::fmt::Display for Profile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let total = self.total().max(1);
+        for (name, v) in &self.phases {
+            writeln!(f, "  {name:<28} {v:>12}  {:5.1}%", 100.0 * *v as f64 / total as f64)?;
+        }
+        Ok(())
+    }
+}
+
 /// The height of a Merkle cap of `cap.len() / 32` roots.
 fn cap_height(cap: &[u8]) -> usize {
     let roots = cap.len() / 32;
@@ -641,6 +681,7 @@ fn openings<T: CircuitTrait>(
     queries: &[Vec<usize>],
     cap: &[Byte],
     fold_point: &[Elem],
+    profile: &mut Profile,
 ) -> (Vec<Elem>, Vec<usize>) {
     let roots: Vec<Vec<usize>> = cap.chunks(32).map(bytes_to_wires).collect();
     assert!(roots.len().is_power_of_two(), "a cap is a power of two of roots");
@@ -652,6 +693,7 @@ fn openings<T: CircuitTrait>(
         // The row, as elements for the fold and as bytes for the leaf.
         let row_bytes: Vec<Byte> = elems.iter().flat_map(|e| wires_to_bytes(e)).collect();
         let mut node = bytes_to_wires(&blake3::hash_bytes(b, &row_bytes));
+        profile.mark(b, "leaf hashes");
         for (level, sibling) in siblings.iter().enumerate() {
             let sib = bytes_to_wires(sibling);
             // The running node is the right child when the index bit is set.
@@ -660,9 +702,12 @@ fn openings<T: CircuitTrait>(
             let pair: Vec<Byte> = [wires_to_bytes(&left), wires_to_bytes(&right)].concat();
             node = bytes_to_wires(&blake3::hash_bytes(b, &pair));
         }
+        profile.mark(b, "merkle paths");
         let root = select(b, &roots, &bits[siblings.len()..]);
         checks.push(equal(b, &node, &root));
+        profile.mark(b, "cap selection");
         folds.push(eval_multilinear(b, elems, fold_point));
+        profile.mark(b, "query folds");
     }
     (folds, checks)
 }
@@ -686,6 +731,7 @@ pub struct Shape {
     pub output: usize,
     pub flushes: usize,
     pub witness: Vec<bool>,
+    pub profile: Profile,
 }
 
 /// Build the verifier circuit for `cfg` on `CircuitAdapter`, keeping the gates.
@@ -702,8 +748,10 @@ pub fn build_with<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data) -> Shape 
     // The reference run, for the query indices the expanded paths need.
     let ch = reference::transcript(cfg, d, &mut reference::Challenger::new());
 
+    let mut profile = Profile::default();
     let inputs = Inputs::allocate(b, cfg, d, &ch);
     let (t, m, flushes) = transcript(b, &inputs, cfg, d);
+    profile.mark(b, "transcript (sponge)");
     let mut checks: Vec<usize> = t.pow_checks.clone();
 
     // The initial constraint and claim.
@@ -738,25 +786,30 @@ pub fn build_with<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data) -> Shape 
     let mut constraints: Vec<(Elem, usize, usize, Vec<Vec<Elem>>, Vec<Vec<Elem>>)> =
         vec![(t.alpha.clone(), cfg.num_variables, 0, eq_groups.concat(), Vec::new())];
 
+    profile.mark(b, "initial claim");
     for (r, x) in m.initial_sumcheck.iter().zip(&t.initial_folding) {
         claim = sumcheck_round(b, &claim, &r[0], &r[1], x);
     }
+    profile.mark(b, "sumcheck rounds");
     let mut randomness: Vec<Elem> = t.initial_folding.clone();
     let mut prev_root: Vec<Byte> = m.root.clone();
     let mut prev_folding: Vec<Elem> = t.initial_folding.clone();
 
     for (i, (rc, rt)) in cfg.rounds.iter().zip(&t.rounds).enumerate() {
         let reversed: Vec<Elem> = prev_folding.iter().rev().cloned().collect();
-        let (folds, merkle) = openings(b, &inputs.rounds[i].opening, &rt.queries, &prev_root, &reversed);
+        let (folds, merkle) = openings(b, &inputs.rounds[i].opening, &rt.queries, &prev_root, &reversed, &mut profile);
         checks.extend(merkle);
         let points: Vec<Vec<Elem>> = rt.queries.iter().map(|bits| query_point(b, rc.num_variables, bits)).collect();
+        profile.mark(b, "query points");
         let ood: Vec<Vec<Elem>> = rt.ood_points.iter().map(|y| expand_univariate(b, y, rc.num_variables)).collect();
         combine_into(b, &mut claim, &rt.combination, 1, &m.rounds[i].ood_answers);
         combine_into(b, &mut claim, &rt.combination, 1 + m.rounds[i].ood_answers.len(), &folds);
         constraints.push((rt.combination.clone(), rc.num_variables, 1, ood, points));
+        profile.mark(b, "claim combination");
         for (r, x) in m.rounds[i].sumcheck.iter().zip(&rt.folding) {
             claim = sumcheck_round(b, &claim, &r[0], &r[1], x);
         }
+        profile.mark(b, "sumcheck rounds");
         randomness.extend(rt.folding.iter().cloned());
         prev_root = m.rounds[i].root.clone();
         prev_folding = rt.folding.clone();
@@ -764,17 +817,20 @@ pub fn build_with<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data) -> Shape 
 
     // The final openings against the final polynomial.
     let reversed: Vec<Elem> = prev_folding.iter().rev().cloned().collect();
-    let (folds, merkle) = openings(b, &inputs.final_opening, &t.final_queries, &prev_root, &reversed);
+    let (folds, merkle) = openings(b, &inputs.final_opening, &t.final_queries, &prev_root, &reversed, &mut profile);
     checks.extend(merkle);
     let final_vars = m.final_poly.len().trailing_zeros() as usize;
     for (fold, bits) in folds.iter().zip(&t.final_queries) {
         let point = query_point(b, final_vars, bits);
+        profile.mark(b, "query points");
         let at = eval_coefficients(b, &m.final_poly, &point);
         checks.push(equal(b, &at, fold));
+        profile.mark(b, "final polynomial at queries");
     }
     for (r, x) in m.final_sumcheck.iter().zip(&t.final_folding) {
         claim = sumcheck_round(b, &claim, &r[0], &r[1], x);
     }
+    profile.mark(b, "sumcheck rounds");
     randomness.extend(t.final_folding.iter().cloned());
 
     // The weights in suffix order, and the closing identity.
@@ -784,18 +840,24 @@ pub fn build_with<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data) -> Shape 
         let local = &reversed_all[..*arity];
         let mut shift = *initial_power;
         let eq_w: Vec<Elem> = eq_points.iter().map(|p| eq_eval(b, p, local)).collect();
+        profile.mark(b, "closing eq weights");
         let mut acc = zero_elem(b);
         combine_into(b, &mut acc, chi, shift, &eq_w);
         shift += eq_w.len();
+        profile.mark(b, "claim combination");
         let sel_w: Vec<Elem> = direct_points.iter().map(|p| select_point_weight(b, p, local)).collect();
+        profile.mark(b, "closing query weights");
         combine_into(b, &mut acc, chi, shift, &sel_w);
         total = tower::add(b, &total, &acc);
+        profile.mark(b, "claim combination");
     }
     let final_reversed: Vec<Elem> = t.final_folding.iter().rev().cloned().collect();
     let final_value = eval_multilinear(b, &m.final_poly, &final_reversed);
     let expected = tower::mul(b, &total, &final_value);
     checks.push(equal(b, &claim, &expected));
 
+    profile.mark(b, "closing identity");
     let output = and_all(b, &checks);
-    Shape { output, flushes, witness: inputs.witness }
+    profile.mark(b, "closing identity");
+    Shape { output, flushes, witness: inputs.witness, profile }
 }
