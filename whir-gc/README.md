@@ -108,8 +108,8 @@ whole process in the last column:
 
 | proof | queries | non-free gates | wires | live at peak | garbled | plan | garble | RSS |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 8 variables, rate 1/8 | 72 | 11,473,018 | 80.8M | 0.94M | 183 MB | 1.6 s | 5.5 s | |
-| 12 variables, rate 1/8 | 68 + 33 | 21,980,196 | 150.7M | 1.06M | 351 MB | 2.8 s | 10.1 s | |
+| 8 variables, rate 1/8 | 72 | 11,473,018 | 80.8M | 0.94M | 183 MB | 1.6 s | 5.5 s | — |
+| 12 variables, rate 1/8 | 68 + 33 | 21,980,196 | 150.7M | 1.06M | 351 MB | 2.8 s | 10.1 s | — |
 | **18 variables, rate 1/32, folding 4, terminal security 110** | 35 + 22 + 16 | **24,269,949** | 165.5M | 1.28M | **388 MB** | 3.1 s | 11.1 s | 250 MB |
 
 The 2^18 proof (a 2^18-row table, the commitment on a 2^23-point domain,
