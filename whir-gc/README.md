@@ -142,6 +142,44 @@ and every query the selection, while only the deep paths save much.
 | --- | ---: | ---: | ---: | ---: | ---: |
 | non-free gates | 24,269,949 | **21,200,494** | 21,540,757 | 23,009,172 | 26,733,891 |
 
+## Where the gates go, and the parameter sweep
+
+`circuit::Profile` charges every non-free gate to the phase that emits it;
+the streaming test prints it. The 2^18 schedule at rate 1/32, folding 4,
+cap of 32, 21,200,494 non-free gates:
+
+| phase | non-free gates | share |
+| --- | ---: | ---: |
+| Merkle paths (compressions, 10,281 each) | 10,447,624 | 49.3% |
+| leaf hashes (256-byte rows, 41,511 each) | 3,030,303 | 14.3% |
+| query folds (15 multiplications each, 2,187 per multiplication) | 2,394,765 | 11.3% |
+| closing query weights | 1,903,719 | 9.0% |
+| transcript (the sponge's flushes) | 1,475,727 | 7.0% |
+| final polynomial at the final queries | 655,216 | 3.1% |
+| claim combination | 564,236 | 2.7% |
+| cap selection | 217,015 | 1.0% |
+| closing eq weights, sumcheck rounds, closing identity, initial claim | 511,889 | 2.4% |
+
+Three quarters is hashing, and the rest is `GF(2^128)` multiplication. The
+same table for the other parameters of the 2^18 schedule
+(`WHIR_GC_RATE`, `WHIR_GC_FOLDING`; each is one proof and its grinding time
+is one draw of a lottery, so the proving times are indicative only):
+
+| rate | folding | queries | cap | non-free gates | garbled | proving |
+| ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 1/16 | 4 | 45 + 26 + 18 | 32 | 24,560,837 | 393 MB | 38 s |
+| 1/32 | 2 | 37 + 31 + 26 + 23 + 20 + 18 | 32 | 36,327,977 | 581 MB | 39 s |
+| 1/32 | 3 | 35 + 25 + 20 + 16 | 32 | 24,548,531 | 393 MB | 142 s |
+| **1/32** | **4** | **35 + 22 + 16** | **32** | **21,200,494** | **339 MB** | 150 s |
+| 1/32 | 5 | 34 + 19 + 13 | 32 | 22,808,713 | 364 MB | 926 s |
+| 1/64 | 4 | 28 + 19 + 14 | 16 | 18,988,736 | 304 MB | 1,102 s |
+
+Folding trades leaf width against path count: at folding 2 the paths are
+64% of the circuit, at folding 5 the 512-byte leaves and the 31
+multiplications per fold overtake the shorter paths. Halving the rate buys
+10% fewer gates for a prover domain twice the size and much more grinding.
+Rate 1/32 with folding 4 is the configuration to carry forward.
+
 ## Plan
 
 1. Done: `reference`, checked op for op against the logged run and accepting
