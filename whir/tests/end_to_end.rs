@@ -1254,3 +1254,103 @@ fn plonky3_proof_verifies_in_the_reference_verifier() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The whole verifier in Bitcoin Script, on real proofs.
+// ---------------------------------------------------------------------------
+
+/// `execute_script` without the 1000-item stack limit.
+///
+/// A 35-query proof's Merkle data alone is over that limit; a deployment
+/// chunks the verification across transactions. Whether the script verifies
+/// is a separate question from how it is split, and the one asked here.
+fn run_unbounded(script: bitcoin::ScriptBuf) -> bitcoin_scriptexec::ExecuteInfo {
+    use bitcoin::hashes::Hash;
+    use bitcoin_scriptexec::{Exec, ExecCtx, ExecuteInfo, FmtStack, Options, TxTemplate};
+    let mut exec = Exec::new(
+        ExecCtx::Tapscript,
+        Options { enforce_stack_limit: false, ..Options::default() },
+        TxTemplate {
+            tx: bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            },
+            prevouts: vec![],
+            input_idx: 0,
+            taproot_annex_scriptleaf: Some((bitcoin::TapLeafHash::all_zeros(), None)),
+        },
+        script,
+        vec![],
+    )
+    .expect("exec");
+    while exec.exec_next().is_ok() {}
+    let res = exec.result().expect("result");
+    ExecuteInfo {
+        success: res.success,
+        error: res.error.clone(),
+        last_opcode: res.opcode,
+        final_stack: FmtStack(exec.stack().clone()),
+        remaining_script: exec.remaining_script().to_asm_string(),
+        stats: exec.stats().clone(),
+    }
+}
+
+/// Plonky3's proof, verified end to end by the script `proof_script::build`
+/// emits: the transcript on the script's own sponge, every opening hashed and
+/// walked to its root, every fold, the STIR checks and the closing identity.
+#[test]
+fn plonky3_proof_verifies_end_to_end_in_bitcoin_script() {
+    for num_vars in [6usize, 8] {
+        NUM_VARS.with(|v| *v.borrow_mut() = num_vars);
+        let (commitment, proof, num_variables, protocol) = prove_full();
+        let perm = default_koalabear_poseidon2_16();
+        let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
+        let config =
+            WhirConfig::<EF, F, Logger>::new(num_variables, params(num_variables)).expect("config");
+        let pcs = LogPcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
+        let mut ds = DomainSeparator::new(vec![]);
+        pcs.add_domain_separator::<8>(&mut ds);
+        let (cfg, data) = verify_inputs(&pcs, &ds, &protocol, &commitment, &proof);
+        reference::verify(&cfg, &data).expect("the reference accepts");
+
+        let built = whir::proof_script::build(&cfg, &data).expect("a valid proof builds");
+        let info = run_unbounded(built.script.clone());
+        assert!(
+            info.error.is_none(),
+            "{num_vars} vars: the script rejected a valid proof: {:?} at {:?}",
+            info.error,
+            info.last_opcode
+        );
+        eprintln!(
+            "{num_vars} vars: verified in script; {} bytes, {} data elements, peak stack {}, transcript permutations {}",
+            built.script.len(),
+            built.data.len(),
+            info.stats.max_nb_stack_items,
+            built.transcript_permutations
+        );
+
+        // The script must not merely run: a wrong parameter or a wrong prover
+        // message has to fail it. A message changed after the openings were
+        // made moves the queries off the openings, which the builder already
+        // cannot lay out; that counts as a rejection too.
+        let rejects = |cfg: &reference::VerifyConfig, data: &reference::VerifyData| -> bool {
+            match whir::proof_script::build(cfg, data) {
+                Ok(built) => run_unbounded(built.script).error.is_some(),
+                Err(_) => true,
+            }
+        };
+        let mut wrong = cfg.clone();
+        wrong.final_folded_domain_gen ^= 1;
+        assert!(rejects(&wrong, &data), "{num_vars} vars: wrong final generator");
+
+        let mut bad_data = data.clone();
+        bad_data.final_opening.rows[0][0] ^= 1;
+        assert!(rejects(&cfg, &bad_data), "{num_vars} vars: changed row");
+
+        let mut bad_data = data.clone();
+        bad_data.transcript.final_poly[0][0] ^= 1;
+        assert!(rejects(&cfg, &bad_data), "{num_vars} vars: changed final polynomial");
+    }
+}
