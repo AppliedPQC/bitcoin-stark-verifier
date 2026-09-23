@@ -6,12 +6,12 @@ license.workspace = true
 description = "A WHIR verifier over the binary tower fields as a boolean circuit, on bitvm-gc's circuit API"
 
 [dependencies]
+blake3 = "1"
 garbled-snark-verifier.workspace = true
 p3-binary-field.workspace = true
 p3-field.workspace = true
 
 [dev-dependencies]
-blake3 = "1"
 rand.workspace = true
 rand_chacha.workspace = true
 rand010.workspace = true

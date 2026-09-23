@@ -6,4 +6,6 @@
 //! it exists, against proofs from Plonky3's prover.
 
 pub mod blake3;
+pub mod pruned;
+pub mod reference;
 pub mod tower;
