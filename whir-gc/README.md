@@ -119,15 +119,30 @@ gates: ~110× smaller than `bitvm-gc`'s Groth16 verifier, and its garbled
 form is 388 MB. Both smaller circuits come out identical to their stored
 builds, and every case rejects the proof with an opened row changed.
 
+## With a Merkle cap, measured
+
+A cap of `2^h` roots costs the transcript one flush of `32 · 2^h` bytes per
+commitment and each query a selection of its root by the top `h` index bits
+(a mux tree, `256 · (2^h − 1)` AND), and saves each query `h` compressions
+(10,281 AND each). The same proofs with Plonky3's `recommended_cap_height`
+(the log of the most draws in a round, capped by the shallowest tree):
+
+| proof | cap | non-free gates | against a single root | garbled | garble |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 8 variables, rate 1/8, 72 queries | 64 roots | **7,478,776** | −35% | 119 MB | 4.0 s |
+| 12 variables, rate 1/8, 68 + 33 queries | 64 roots | **16,758,412** | −24% | 268 MB | 8.2 s |
+| 18 variables, rate 1/32, 35 + 22 + 16 queries | 32 roots | **21,200,494** | −13% | **339 MB** | 10.0 s |
+
+`streaming_garbler_on_the_2_18_schedule` takes `WHIR_GC_CAP=<height>` to
+try another height.
+
 ## Plan
 
 1. Done: `reference`, checked op for op against the logged run and accepting
    the real proofs; `circuit`, accepting them in Execute mode; `garble`, the
    true label only for a valid proof; `stream`, the 2^18 schedule garbled in
-   250 MB of memory; multi-chunk Blake3.
-2. A Merkle cap in place of the single root (64 roots absorb 2 KB but save
-   six compressions per query), now that the gadget hashes any length.
-3. The on-chain side: BitVM3's transaction structure takes this circuit as a
-   drop-in. Then the evaluator's half: the ciphertexts streamed to it, and
-   the garbling made verifiable (cut-and-choose or a proof of correct
-   garbling), which is what the fixed public `Δ` upstream stands in for.
+   250 MB of memory; multi-chunk Blake3; the Merkle cap.
+2. The on-chain side waits for a design. Then the evaluator's half: the
+   ciphertexts streamed to it, and the garbling made verifiable
+   (cut-and-choose or a proof of correct garbling), which is what the fixed
+   public `Δ` upstream stands in for.

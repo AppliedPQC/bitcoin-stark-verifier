@@ -550,7 +550,8 @@ fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
 #[test]
 fn streaming_garbler_builds_verifies_and_scales() {
     for (num_vars, rate, term_bits) in [(8usize, 3usize, 110usize), (12, 3, 110)] {
-        streaming_case(num_vars, rate, term_bits);
+        streaming_case(num_vars, rate, term_bits, Some(0));
+        streaming_case(num_vars, rate, term_bits, None);
     }
 }
 
@@ -560,17 +561,22 @@ fn streaming_garbler_builds_verifies_and_scales() {
 #[test]
 #[ignore]
 fn streaming_garbler_on_the_2_18_schedule() {
-    streaming_case(18, 5, 110);
+    // `WHIR_GC_CAP=<height>` overrides Plonky3's recommended cap height.
+    let cap = std::env::var("WHIR_GC_CAP").ok().map(|s| s.parse().expect("a cap height"));
+    streaming_case(18, 5, 110, cap);
 }
 
-fn streaming_case(num_vars: usize, rate: usize, term_bits: usize) {
+/// One proof through plan and streamed garbling, with a single root
+/// (`Some(0)`) or Plonky3's recommended Merkle cap (`None`).
+fn streaming_case(num_vars: usize, rate: usize, term_bits: usize, cap_height: Option<usize>) {
     use whir_gc::stream::{Plan, Streaming};
     {
         let t = std::time::Instant::now();
-        let run = prove_and_log(num_vars, rate, 4, term_bits, Some(0));
+        let run = prove_and_log(num_vars, rate, 4, term_bits, cap_height);
         let prove_time = t.elapsed();
         let (cfg, data) = inputs(&run);
         drop(run);
+        let cap = data.cap.len() / 32;
         let ok = reference::verify(&cfg, &data).expect("the reference accepts");
         eprintln!(
             "{num_vars} vars: proved in {:.1?}; queries {:?} + final {}",
@@ -596,7 +602,7 @@ fn streaming_case(num_vars: usize, rate: usize, term_bits: usize) {
         assert_eq!((plan_counts.direct_and, plan_counts.direct_or, plan_counts.direct_xor), (counts.direct_and, counts.direct_or, counts.direct_xor));
         assert_eq!(plan_wires, s.wires());
         eprintln!(
-            "{num_vars} vars, rate 1/{}, terminal security {term_bits}: queries {:?} + final {}; proved in {:.1?}; {} non-free gates ({} AND, {} OR), {} XOR, {} wires, {} inputs; planned in {:.1?}; garbled {} MB in {:.1?} with {} live slots at peak",
+            "{num_vars} vars, rate 1/{}, terminal security {term_bits}, cap of {cap}: queries {:?} + final {}; proved in {:.1?}; {} non-free gates ({} AND, {} OR), {} XOR, {} wires, {} inputs; planned in {:.1?}; garbled {} MB in {:.1?} with {} live slots at peak",
             1 << rate,
             ok.challenges.rounds.iter().map(|r| r.queries.len()).collect::<Vec<_>>(),
             ok.challenges.final_queries.len(),
@@ -613,7 +619,7 @@ fn streaming_case(num_vars: usize, rate: usize, term_bits: usize) {
             s.peak_live(),
         );
 
-        if num_vars < 18 {
+        if num_vars < 18 && cap == 1 {
             // Against the stored-gate build (`circuit_accepts_real_proofs_and_rejects_a_flipped_bit`,
             // whose counts these are; rebuilding it here would need its 4 GB), and unplanned.
             let stored = match num_vars {

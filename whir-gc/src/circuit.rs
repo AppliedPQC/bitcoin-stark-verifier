@@ -178,9 +178,16 @@ impl Inputs {
 
     /// Rows and full sibling paths: the pruned proof expanded outside the
     /// circuit, which is sound -- a path is a hint, the root is not.
-    fn opening<T: ValuedBuilder>(&mut self, b: &mut T, o: &reference::Opening, indices: &[usize], index_width: usize) -> OpeningInputs {
+    fn opening<T: ValuedBuilder>(
+        &mut self,
+        b: &mut T,
+        o: &reference::Opening,
+        indices: &[usize],
+        index_width: usize,
+        cap_height: usize,
+    ) -> OpeningInputs {
         let leaves: Vec<pruned::Digest> = o.rows.iter().map(|r| reference::leaf(r)).collect();
-        let paths = pruned::expand(&o.boundaries, indices, &leaves, index_width, 0).expect("openings expand");
+        let paths = pruned::expand(&o.boundaries, indices, &leaves, index_width, cap_height).expect("openings expand");
         let rows = o.rows.iter().map(|row| row.iter().map(|&x| self.elem(b, x)).collect()).collect();
         let siblings = paths.iter().map(|p| p.siblings.iter().map(|s| self.bytes(b, s)).collect()).collect();
         OpeningInputs { rows, siblings }
@@ -204,18 +211,21 @@ impl Inputs {
         me.initial_ood_answers = d.initial_ood_answers.iter().map(|&x| me.elem(b, x)).collect();
         me.openings = d.openings.iter().map(|evals| evals.iter().map(|&x| me.elem(b, x)).collect()).collect();
         me.initial_sumcheck = me.sumcheck(b, &d.initial_sumcheck, cfg.initial_folding_pow_bits);
+        // Each round opens the previous commitment.
+        let mut prev_cap: &[u8] = &d.cap;
         for (i, (rc, rd)) in cfg.rounds.iter().zip(&d.rounds).enumerate() {
             let root = me.bytes(b, &rd.cap);
             let ood_answers = rd.ood_answers.iter().map(|&x| me.elem(b, x)).collect();
             let pow_witness = (rc.pow_bits > 0).then(|| me.elem(b, rd.pow_witness));
             let sumcheck = me.sumcheck(b, &rd.sumcheck, rc.folding_pow_bits);
-            let opening = me.opening(b, &rd.opening, &ch.rounds[i].queries, rc.index_width);
+            let opening = me.opening(b, &rd.opening, &ch.rounds[i].queries, rc.index_width, cap_height(prev_cap));
+            prev_cap = &rd.cap;
             me.rounds.push(RoundInputs { root, ood_answers, pow_witness, sumcheck, opening });
         }
         me.final_poly = d.final_poly.iter().map(|&x| me.elem(b, x)).collect();
         me.final_pow_witness = (cfg.final_pow_bits > 0).then(|| me.elem(b, d.final_pow_witness));
         me.final_sumcheck = me.sumcheck(b, &d.final_sumcheck, cfg.final_folding_pow_bits);
-        me.final_opening = me.opening(b, &d.final_opening, &ch.final_queries, cfg.final_index_width);
+        me.final_opening = me.opening(b, &d.final_opening, &ch.final_queries, cfg.final_index_width, cap_height(prev_cap));
         me
     }
 }
@@ -604,20 +614,41 @@ fn transcript<T: CircuitTrait>(b: &mut T, inputs: &Inputs, cfg: &Config, d: &Dat
 // The openings on wires.
 // ---------------------------------------------------------------------------
 
-/// Authenticate every query's row against `root` and fold it at `fold_point`.
-/// Returns per query the fold and the check wire.
+/// The height of a Merkle cap of `cap.len() / 32` roots.
+fn cap_height(cap: &[u8]) -> usize {
+    let roots = cap.len() / 32;
+    assert!(roots.is_power_of_two() && roots * 32 == cap.len(), "a cap is a power of two of 32-byte roots");
+    roots.trailing_zeros() as usize
+}
+
+/// `entries[sel]`, for `sel` given as bits, least significant first: a mux
+/// tree, one AND per wire per pair merged.
+fn select<T: CircuitTrait>(b: &mut T, entries: &[Vec<usize>], sel: &[usize]) -> Vec<usize> {
+    assert_eq!(entries.len(), 1 << sel.len());
+    let mut layer: Vec<Vec<usize>> = entries.to_vec();
+    for &bit in sel {
+        layer = layer.chunks(2).map(|pair| mux(b, bit, &pair[0], &pair[1])).collect();
+    }
+    layer.pop().expect("one entry left")
+}
+
+/// Authenticate every query's row against the Merkle cap `cap` (`2^h` roots
+/// of 32 bytes, the root of query index `i` being entry `i >> depth`) and
+/// fold it at `fold_point`. Returns per query the fold and the check wire.
 fn openings<T: CircuitTrait>(
     b: &mut T,
     opening: &OpeningInputs,
     queries: &[Vec<usize>],
-    root: &[Byte],
+    cap: &[Byte],
     fold_point: &[Elem],
 ) -> (Vec<Elem>, Vec<usize>) {
-    assert_eq!(root.len(), 32, "a single root: cap height zero");
-    let root_wires = bytes_to_wires(root);
+    let roots: Vec<Vec<usize>> = cap.chunks(32).map(bytes_to_wires).collect();
+    assert!(roots.len().is_power_of_two(), "a cap is a power of two of roots");
+    let height = roots.len().trailing_zeros() as usize;
     let mut folds = Vec::new();
     let mut checks = Vec::new();
     for ((elems, bits), siblings) in opening.rows.iter().zip(queries).zip(&opening.siblings) {
+        assert_eq!(siblings.len() + height, bits.len(), "the path reaches the cap layer");
         // The row, as elements for the fold and as bytes for the leaf.
         let row_bytes: Vec<Byte> = elems.iter().flat_map(|e| wires_to_bytes(e)).collect();
         let mut node = bytes_to_wires(&blake3::hash_bytes(b, &row_bytes));
@@ -629,7 +660,8 @@ fn openings<T: CircuitTrait>(
             let pair: Vec<Byte> = [wires_to_bytes(&left), wires_to_bytes(&right)].concat();
             node = bytes_to_wires(&blake3::hash_bytes(b, &pair));
         }
-        checks.push(equal(b, &node, &root_wires));
+        let root = select(b, &roots, &bits[siblings.len()..]);
+        checks.push(equal(b, &node, &root));
         folds.push(eval_multilinear(b, elems, fold_point));
     }
     (folds, checks)
