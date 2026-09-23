@@ -24,6 +24,7 @@ use p3_whir::{WhirConfig, WhirProver};
 use rand010::SeedableRng;
 use rand010::rngs::SmallRng;
 use std::sync::{Arc, Mutex};
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 use whir_gc::reference::{self, Sponge};
 
 type F = BinaryField128;
@@ -478,5 +479,46 @@ fn circuit_accepts_real_proofs_and_rejects_a_flipped_bit() {
             let wires = built.circuit.eval_gates(&w);
             assert!(!wires[built.output], "bit {at} flipped must be rejected");
         }
+    }
+}
+
+/// M2: the verifier circuit garbled and evaluated. A valid proof's evaluation
+/// yields the output's true label; a proof with one bit flipped yields the
+/// false label. Sizes and times are the deliverable.
+#[test]
+fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
+    for (num_vars, term_bits) in [(8usize, 110usize), (12, 110)] {
+        let run = prove_and_log(num_vars, 3, 4, term_bits, Some(0));
+        let (cfg, data) = inputs(&run);
+        let built = whir_gc::circuit::build(&cfg, &data);
+        let non_free = built.counts.direct_and + built.counts.direct_or;
+
+        let t = std::time::Instant::now();
+        let garbled = whir_gc::garble::garble(&built.circuit, built.witness.len(), built.output);
+        let garble_time = t.elapsed();
+        assert_eq!(garbled.ciphertexts.len(), non_free);
+
+        let t = std::time::Instant::now();
+        let e = whir_gc::garble::evaluate(&built.circuit, &garbled, &built.witness);
+        let eval_time = t.elapsed();
+        assert!(e.value, "the circuit accepts");
+        assert_eq!(e.label, garbled.output0 ^ garbled.delta, "an accepting evaluation yields the true label");
+
+        let mut w = built.witness.clone();
+        let mid = w.len() / 2;
+        w[mid] = !w[mid];
+        let bad = whir_gc::garble::evaluate(&built.circuit, &garbled, &w);
+        assert!(!bad.value);
+        assert_eq!(bad.label, garbled.output0, "a rejecting evaluation yields the false label");
+
+        eprintln!(
+            "{num_vars} vars, terminal security {term_bits}: {} non-free gates, garbled {} MB in {:.1?} ({:.1}M gates/s), evaluated in {:.1?}; {} wires",
+            non_free,
+            garbled.ciphertext_bytes() / 1_000_000,
+            garble_time,
+            (built.circuit.next_wire() as f64) / garble_time.as_secs_f64() / 1e6,
+            eval_time,
+            built.circuit.next_wire()
+        );
     }
 }

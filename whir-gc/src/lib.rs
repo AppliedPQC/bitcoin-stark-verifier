@@ -7,6 +7,7 @@
 
 pub mod blake3;
 pub mod circuit;
+pub mod garble;
 pub mod pruned;
 pub mod reference;
 pub mod tower;

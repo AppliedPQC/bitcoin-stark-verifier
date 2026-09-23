@@ -55,11 +55,32 @@ Each accepts the proof it was built from and rejects it with any single input
 bit flipped, evaluated in Execute mode. For scale, `bitvm-gc`'s Groth16
 verifier circuit is 2.72 × 10^9 non-free gates.
 
+## Garbled, measured
+
+`garble` streams over the gate list with one label per wire -- the same
+formulas as `bitvm-gc`'s `gate_garbled`/`Gate::e` (privacy-free: one 16-byte
+ciphertext per AND/OR, free XOR, `H(l) = Blake3(l ‖ gid)`), without
+materialising a `Wire` per wire -- and `evaluate` walks it with the proof's
+values, which is the BitVM3 setting: the proof is public, and the point is
+that the output's *true* label comes out only of an accepting evaluation.
+Single thread:
+
+| circuit | garbled | garbling | evaluation |
+| --- | ---: | ---: | ---: |
+| 8 variables, 72 queries, 11.47M non-free gates | **183 MB** | 3.2 s (25M wires/s) | 2.2 s |
+| 12 variables, 68 + 33 queries, 21.98M non-free gates | **351 MB** | 6.9 s | 7.4 s |
+
+Each valid proof yields the true output label; with one input bit flipped,
+the false one. Upstream's `DELTA` is the fixed public constant `S::one()`
+(its own `FIXME`), under which any label yields its complement; `garble`
+draws `Δ` at random, as a deployment must.
+
 ## Plan
 
 1. Done: `reference`, checked op for op against the logged run and accepting
-   the real proofs; `circuit`, accepting them in Execute mode.
+   the real proofs; `circuit`, accepting them in Execute mode; `garble`, the
+   true label only for a valid proof.
 2. Multi-chunk Blake3 in the gadget, so the commitment can be a Merkle cap
    (64 roots absorb 2 KB but save six compressions per query).
-3. Garble and evaluate the 100-bit schedules with `bitvm-gc`'s garbler;
-   measure size and time.
+3. The 2^18 schedule (84 queries over three rounds), and the on-chain side:
+   BitVM3's transaction structure takes this circuit as a drop-in.
