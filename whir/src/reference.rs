@@ -297,3 +297,338 @@ pub fn closing_sum(evals: &[[u32; 4]], points: &[([u32; 4], Vec<[u32; 4]>)]) -> 
     }
     acc
 }
+
+// ---------------------------------------------------------------------------
+// The WHIR verifier's transcript, as Plonky3 executes it.
+//
+// Plonky3's `DomainSeparator` declares an observe/sample pattern; the
+// verifier then runs a sequence of calls whose every sampler
+// (`sample_algebra_element`, `sample_bits`, `sample_uniform_bits`,
+// `check_witness`) is a trait default over one primitive `sample()`, and
+// whose every observer bottoms out in `observe(F)`. `transcript` is that
+// executed sequence, written over the two primitives, so that anything able
+// to observe and sample (the reference sponge, a log of Plonky3's own calls,
+// a script) can be driven through the same schedule.
+//
+// The order, per `WhirVerifier::verify` and the PCS adapter around it:
+//
+//   1. the domain-separator pattern, then the commitment root
+//   2. per commitment OOD sample: draw the point, absorb the answer
+//   3. per opening claim: draw the point, absorb the evaluations
+//   4. draw the batching randomness
+//   5. the initial sumcheck: per round absorb `[c0, c_inf]`, PoW, draw
+//   6. per intermediate round: absorb the root; per OOD draw and absorb;
+//      PoW; one *base* sample as a checkpoint; the STIR queries by uniform
+//      rejection until `num_queries` are distinct; draw the combination
+//      randomness; the round's sumcheck as in 5
+//   7. absorb the final polynomial; PoW; the final STIR queries (no
+//      checkpoint); the final sumcheck as in 5
+// ---------------------------------------------------------------------------
+
+/// What a transcript needs of its challenger: the two primitives every
+/// Plonky3 sampler and observer reduces to, and the derived draws.
+pub trait Sponge {
+    fn observe(&mut self, value: u32);
+    fn sample(&mut self) -> u32;
+
+    fn observe_ef(&mut self, x: &[u32; 4]) {
+        for &c in x {
+            self.observe(c);
+        }
+    }
+
+    /// An EF element: four base samples, coefficients in draw order.
+    fn sample_ef(&mut self) -> [u32; 4] {
+        let a = self.sample();
+        let b = self.sample();
+        let c = self.sample();
+        let d = self.sample();
+        [a, b, c, d]
+    }
+
+    /// `DuplexChallenger::sample_bits`: one draw, the low `bits` bits kept.
+    fn sample_bits(&mut self, bits: usize) -> u32 {
+        sample_bits(self.sample(), bits)
+    }
+
+    /// `check_witness`: absorb the witness, then `bits` sampled bits must be zero.
+    fn check_witness(&mut self, bits: usize, witness: u32) -> bool {
+        if bits == 0 {
+            return true;
+        }
+        self.observe(witness);
+        self.sample_bits(bits) == 0
+    }
+
+    /// `DuplexChallenger::sample_uniform_bits::<true>`: draw until the
+    /// element is below `m_k = floor(P / 2^k) * 2^k`, keep its low `k` bits;
+    /// past 24 bits, two half-width draws are combined.
+    fn sample_uniform_bits(&mut self, bits: usize) -> u32 {
+        if bits == 0 {
+            return 0;
+        }
+        if bits <= MAX_SINGLE_SAMPLE_BITS {
+            return self.uniform_chunk(bits);
+        }
+        let half1 = bits / 2;
+        let half2 = bits - half1;
+        let chunk1 = self.uniform_chunk(half1);
+        let chunk2 = self.uniform_chunk(half2);
+        chunk1 | (chunk2 << half1)
+    }
+
+    /// One rejection-sampled chunk of `bits` uniform bits.
+    fn uniform_chunk(&mut self, bits: usize) -> u32 {
+        let m = (poseidon2::constants::P >> bits) << bits;
+        loop {
+            let v = self.sample();
+            if v < m {
+                return v & ((1 << bits) - 1);
+            }
+        }
+    }
+}
+
+/// KoalaBear's `UniformSamplingField::MAX_SINGLE_SAMPLE_BITS`.
+pub const MAX_SINGLE_SAMPLE_BITS: usize = 24;
+
+impl Sponge for Challenger {
+    fn observe(&mut self, value: u32) {
+        Challenger::observe(self, value);
+    }
+
+    fn sample(&mut self) -> u32 {
+        Challenger::sample(self)
+    }
+}
+
+/// One intermediate round's public parameters, as the transcript needs them.
+#[derive(Clone, Debug)]
+pub struct RoundConfig {
+    pub ood_samples: usize,
+    pub pow_bits: usize,
+    pub num_queries: usize,
+    /// log2 of the folded domain the queries index (`domain_size >> folding`).
+    pub domain_bits: usize,
+    /// Sumcheck rounds after this round's commitment: the next folding factor.
+    pub folding: usize,
+    pub folding_pow_bits: usize,
+}
+
+/// The public parameters that shape the transcript.
+#[derive(Clone, Debug)]
+pub struct TranscriptConfig {
+    pub commitment_ood_samples: usize,
+    pub initial_folding: usize,
+    pub initial_folding_pow_bits: usize,
+    pub rounds: Vec<RoundConfig>,
+    pub final_pow_bits: usize,
+    pub final_queries: usize,
+    pub final_domain_bits: usize,
+    pub final_sumcheck_rounds: usize,
+    pub final_folding_pow_bits: usize,
+}
+
+/// One sumcheck round as sent: `[c0, c_inf]` and, with PoW on, a witness.
+#[derive(Clone, Debug)]
+pub struct SumcheckRoundData {
+    pub poly: [[u32; 4]; 2],
+    pub pow_witness: u32,
+}
+
+/// One intermediate round's prover messages.
+#[derive(Clone, Debug)]
+pub struct RoundData {
+    /// The Merkle cap, every root's eight elements in order.
+    pub root: Vec<u32>,
+    pub ood_answers: Vec<[u32; 4]>,
+    pub pow_witness: u32,
+    pub sumcheck: Vec<SumcheckRoundData>,
+}
+
+/// Everything the prover sends that the transcript absorbs.
+#[derive(Clone, Debug)]
+pub struct TranscriptData {
+    pub pattern: Vec<u32>,
+    pub root: Vec<u32>,
+    pub initial_ood_answers: Vec<[u32; 4]>,
+    /// Per opening claim, the evaluations in the order they are absorbed.
+    pub openings: Vec<Vec<[u32; 4]>>,
+    pub initial_sumcheck: Vec<SumcheckRoundData>,
+    pub rounds: Vec<RoundData>,
+    pub final_poly: Vec<[u32; 4]>,
+    pub final_pow_witness: u32,
+    pub final_sumcheck: Vec<SumcheckRoundData>,
+}
+
+/// The challenges one intermediate round draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoundChallenges {
+    pub ood_points: Vec<[u32; 4]>,
+    pub checkpoint: u32,
+    /// Distinct, ascending, as the verifier consumes them.
+    pub queries: Vec<u32>,
+    /// Draws it took, duplicates included.
+    pub draws: usize,
+    pub combination: [u32; 4],
+    pub folding: Vec<[u32; 4]>,
+}
+
+/// Every challenge the verifier draws, in draw order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Challenges {
+    pub initial_ood_points: Vec<[u32; 4]>,
+    pub opening_points: Vec<[u32; 4]>,
+    pub alpha: [u32; 4],
+    pub initial_folding: Vec<[u32; 4]>,
+    pub rounds: Vec<RoundChallenges>,
+    pub final_queries: Vec<u32>,
+    pub final_draws: usize,
+    pub final_folding: Vec<[u32; 4]>,
+    /// Whether every PoW witness passed.
+    pub pow_ok: bool,
+}
+
+/// `SumcheckData::verify_rounds`' transcript: absorb, PoW, draw, per round.
+fn sumcheck_rounds<S: Sponge>(
+    s: &mut S,
+    rounds: &[SumcheckRoundData],
+    expected: usize,
+    pow_bits: usize,
+    pow_ok: &mut bool,
+) -> Vec<[u32; 4]> {
+    assert_eq!(rounds.len(), expected, "sumcheck round count");
+    rounds
+        .iter()
+        .map(|r| {
+            s.observe_ef(&r.poly[0]);
+            s.observe_ef(&r.poly[1]);
+            *pow_ok &= s.check_witness(pow_bits, r.pow_witness);
+            s.sample_ef()
+        })
+        .collect()
+}
+
+/// `get_challenge_stir_queries`: uniform `bits`-bit draws until `num_queries`
+/// distinct indices (capped at the domain), returned ascending, with the
+/// number of draws that took.
+fn stir_queries<S: Sponge>(s: &mut S, bits: usize, num_queries: usize) -> (Vec<u32>, usize) {
+    let target = num_queries.min(1 << bits);
+    let mut queries = Vec::with_capacity(target);
+    let mut draws = 0;
+    while queries.len() < target {
+        let q = s.sample_uniform_bits(bits);
+        draws += 1;
+        if !queries.contains(&q) {
+            queries.push(q);
+        }
+    }
+    queries.sort_unstable();
+    (queries, draws)
+}
+
+/// Drive `s` through the verifier's transcript and collect what it draws.
+pub fn transcript<S: Sponge>(cfg: &TranscriptConfig, data: &TranscriptData, s: &mut S) -> Challenges {
+    let mut pow_ok = true;
+
+    // 1. Pattern, then the commitment.
+    for &v in &data.pattern {
+        s.observe(v);
+    }
+    for &v in &data.root {
+        s.observe(v);
+    }
+
+    // 2. Commitment OOD samples.
+    assert_eq!(data.initial_ood_answers.len(), cfg.commitment_ood_samples);
+    let initial_ood_points = data
+        .initial_ood_answers
+        .iter()
+        .map(|answer| {
+            let point = s.sample_ef();
+            s.observe_ef(answer);
+            point
+        })
+        .collect();
+
+    // 3. Opening claims.
+    let opening_points = data
+        .openings
+        .iter()
+        .map(|evals| {
+            let point = s.sample_ef();
+            for e in evals {
+                s.observe_ef(e);
+            }
+            point
+        })
+        .collect();
+
+    // 4. Batching.
+    let alpha = s.sample_ef();
+
+    // 5. Initial sumcheck.
+    let initial_folding = sumcheck_rounds(
+        s,
+        &data.initial_sumcheck,
+        cfg.initial_folding,
+        cfg.initial_folding_pow_bits,
+        &mut pow_ok,
+    );
+
+    // 6. Intermediate rounds.
+    assert_eq!(data.rounds.len(), cfg.rounds.len(), "round count");
+    let rounds = cfg
+        .rounds
+        .iter()
+        .zip(&data.rounds)
+        .map(|(rc, rd)| {
+            for &v in &rd.root {
+                s.observe(v);
+            }
+            assert_eq!(rd.ood_answers.len(), rc.ood_samples);
+            let ood_points = rd
+                .ood_answers
+                .iter()
+                .map(|answer| {
+                    let point = s.sample_ef();
+                    s.observe_ef(answer);
+                    point
+                })
+                .collect();
+            pow_ok &= s.check_witness(rc.pow_bits, rd.pow_witness);
+            let checkpoint = s.sample();
+            let (queries, draws) = stir_queries(s, rc.domain_bits, rc.num_queries);
+            let combination = s.sample_ef();
+            let folding =
+                sumcheck_rounds(s, &rd.sumcheck, rc.folding, rc.folding_pow_bits, &mut pow_ok);
+            RoundChallenges { ood_points, checkpoint, queries, draws, combination, folding }
+        })
+        .collect();
+
+    // 7. Final polynomial, final queries, final sumcheck.
+    for e in &data.final_poly {
+        s.observe_ef(e);
+    }
+    pow_ok &= s.check_witness(cfg.final_pow_bits, data.final_pow_witness);
+    let (final_queries, final_draws) = stir_queries(s, cfg.final_domain_bits, cfg.final_queries);
+    let final_folding = sumcheck_rounds(
+        s,
+        &data.final_sumcheck,
+        cfg.final_sumcheck_rounds,
+        cfg.final_folding_pow_bits,
+        &mut pow_ok,
+    );
+
+    Challenges {
+        initial_ood_points,
+        opening_points,
+        alpha,
+        initial_folding,
+        rounds,
+        final_queries,
+        final_draws,
+        final_folding,
+        pow_ok,
+    }
+}

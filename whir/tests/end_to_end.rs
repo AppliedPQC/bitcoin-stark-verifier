@@ -87,6 +87,7 @@ fn round_log_inv_rates(num_variables: usize, ff: &FoldingFactor) -> Vec<usize> {
 thread_local! {
     static SECURITY_LEVEL: core::cell::RefCell<usize> = const { core::cell::RefCell::new(32) };
     static RATE_LOG: core::cell::RefCell<usize> = const { core::cell::RefCell::new(1) };
+    static NUM_VARS: core::cell::RefCell<usize> = const { core::cell::RefCell::new(6) };
 }
 
 type Commit = <MyMmcs as p3_commit::Mmcs<F>>::Commitment;
@@ -124,7 +125,7 @@ fn prove_full() -> (Commit, Proof, usize, OpeningProtocol) {
 
     // Build the tables directly: Plonky3's `test_util` helpers are hardwired to
     // BabyBear, and the script under test is KoalaBear.
-    let (width, num_vars) = (2usize, 6usize);
+    let (width, num_vars) = (2usize, NUM_VARS.with(|v| *v.borrow()));
     let specs = vec![TableSpec::new(
         // TableShape::new takes (num_variables, width), in that order.
         TableShape::new(num_vars, width),
@@ -851,6 +852,138 @@ impl GrindingChallenger for Logger {
 
 type LogPcs<L> = WhirProver<EF, F, MyDft, MyMmcs, Logger, L>;
 
+/// Plonky3's logged `observe`/`sample` sequence as a `Sponge`: each call must
+/// match the next logged op. Driving `reference::transcript` through it proves
+/// the transcript's interleaving is the one the verifier executed, and hands
+/// back Plonky3's own draws as the challenges.
+struct LogChecker<'a> {
+    log: &'a [Op],
+    pos: usize,
+}
+
+impl reference::Sponge for LogChecker<'_> {
+    fn observe(&mut self, value: u32) {
+        assert_eq!(
+            self.log.get(self.pos),
+            Some(&Op::Observe(value)),
+            "op {}: the transcript observes {value}",
+            self.pos
+        );
+        self.pos += 1;
+    }
+
+    fn sample(&mut self) -> u32 {
+        match self.log.get(self.pos) {
+            Some(&Op::Sample(v)) => {
+                self.pos += 1;
+                v
+            }
+            other => panic!("op {}: the transcript samples, Plonky3 did {other:?}", self.pos),
+        }
+    }
+}
+
+fn log2_strict(x: usize) -> usize {
+    assert!(x.is_power_of_two(), "{x} is not a power of two");
+    x.trailing_zeros() as usize
+}
+
+fn cap_elements(cap: &Commit) -> Vec<u32> {
+    cap.roots().iter().flat_map(|d| d.iter().map(|x| x.as_canonical_u32())).collect()
+}
+
+fn sumcheck_data(d: &p3_sumcheck::SumcheckData<F, EF>) -> Vec<reference::SumcheckRoundData> {
+    d.polynomial_evaluations
+        .iter()
+        .enumerate()
+        .map(|(i, &[c0, c_inf])| reference::SumcheckRoundData {
+            poly: [ef_coeffs(c0), ef_coeffs(c_inf)],
+            pow_witness: d.pow_witnesses.get(i).map_or(0, |w| w.as_canonical_u32()),
+        })
+        .collect()
+}
+
+/// The transcript's inputs, read off the config and the proof.
+fn transcript_inputs(
+    pcs: &LogPcs<PrefixProver<F, EF>>,
+    ds: &DomainSeparator<EF, F>,
+    commitment: &Commit,
+    proof: &Proof,
+) -> (reference::TranscriptConfig, reference::TranscriptData) {
+    let c = &pcs.config;
+    let fr = c.final_round_config();
+    let cfg = reference::TranscriptConfig {
+        commitment_ood_samples: c.commitment_ood_samples,
+        initial_folding: c.round_folding_factor(0),
+        initial_folding_pow_bits: c.starting_folding_pow_bits,
+        rounds: c
+            .round_parameters
+            .iter()
+            .enumerate()
+            .map(|(i, r)| reference::RoundConfig {
+                ood_samples: r.ood_samples,
+                pow_bits: r.pow_bits,
+                num_queries: r.num_queries,
+                domain_bits: log2_strict(r.domain_size >> r.folding_factor),
+                folding: c.round_folding_factor(i + 1),
+                folding_pow_bits: r.folding_pow_bits,
+            })
+            .collect(),
+        final_pow_bits: fr.pow_bits,
+        final_queries: fr.num_queries,
+        final_domain_bits: log2_strict(fr.domain_size >> fr.folding_factor),
+        final_sumcheck_rounds: c.final_sumcheck_rounds,
+        final_folding_pow_bits: c.final_folding_pow_bits,
+    };
+
+    // `DomainSeparator` keeps its pattern private; absorbing it into a fresh
+    // logger reads it back without touching the verifier's transcript.
+    let mut pattern_log = Logger::new();
+    ds.observe_domain_separator(&mut pattern_log);
+    let pattern = pattern_log
+        .log
+        .iter()
+        .map(|op| match *op {
+            Op::Observe(v) => v,
+            Op::Sample(_) => unreachable!("the pattern is only absorbed"),
+        })
+        .collect();
+
+    let w = &proof.whir;
+    let data = reference::TranscriptData {
+        pattern,
+        root: cap_elements(commitment),
+        initial_ood_answers: w.initial_ood_answers.iter().map(|&e| ef_coeffs(e)).collect(),
+        openings: proof
+            .evals
+            .iter()
+            .map(|b| b.current().iter().chain(b.next()).map(|&e| ef_coeffs(e)).collect())
+            .collect(),
+        initial_sumcheck: sumcheck_data(&w.initial_sumcheck),
+        rounds: w
+            .rounds
+            .iter()
+            .map(|r| reference::RoundData {
+                root: cap_elements(r.commitment.as_ref().expect("round commitment")),
+                ood_answers: r.ood_answers.iter().map(|&e| ef_coeffs(e)).collect(),
+                pow_witness: r.pow_witness.as_canonical_u32(),
+                sumcheck: sumcheck_data(&r.sumcheck),
+            })
+            .collect(),
+        final_poly: w
+            .final_poly
+            .as_ref()
+            .expect("final polynomial")
+            .as_slice()
+            .iter()
+            .map(|&e| ef_coeffs(e))
+            .collect(),
+        final_pow_witness: w.final_pow_witness.as_canonical_u32(),
+        final_sumcheck: w.final_sumcheck.as_ref().map_or_else(Vec::new, sumcheck_data),
+    };
+    (cfg, data)
+}
+
 /// The log as runs, `O<n>` observes then `S<n>` samples, for reading.
 fn runs(log: &[Op]) -> String {
     let mut out = Vec::new();
@@ -872,6 +1005,15 @@ fn runs(log: &[Op]) -> String {
 /// schedule reproduces Plonky3, which is what a script transcript must do.
 #[test]
 fn plonky3_verifier_transcript_replays_on_the_reference_challenger() {
+    // Six variables give no intermediate round; eight give one, so the round
+    // loop (root, OOD, checkpoint, STIR queries, combination) is replayed too.
+    for num_vars in [6usize, 8] {
+        replay_at(num_vars);
+    }
+}
+
+fn replay_at(num_vars: usize) {
+    NUM_VARS.with(|v| *v.borrow_mut() = num_vars);
     let (commitment, proof, num_variables, protocol) = prove_full();
 
     // A verifier typed on the logger. Same parameters, so the same config.
@@ -911,8 +1053,30 @@ fn plonky3_verifier_transcript_replays_on_the_reference_challenger() {
         ch.inner.sponge_state.map(|x| x.as_canonical_u32()),
         "sponge states differ after the full transcript"
     );
+    // Stage 2: the transcript as a function of config and proof. Driven
+    // through the log it must match Plonky3 op for op and consume all of it;
+    // driven through the reference sponge it must draw the same challenges.
+    let (cfg, data) = transcript_inputs(&pcs, &ds, &commitment, &proof);
+    let mut checker = LogChecker { log: &ch.log, pos: 0 };
+    let from_log = reference::transcript(&cfg, &data, &mut checker);
+    assert_eq!(checker.pos, ch.log.len(), "the transcript stopped short of Plonky3's");
+    let from_reference = reference::transcript(&cfg, &data, &mut reference::Challenger::new());
+    assert_eq!(from_log, from_reference, "reference sponge draws differ from Plonky3's");
+    assert!(from_log.pow_ok);
     eprintln!(
-        "transcript: {observed} observes, {sampled} samples over {} ops\nschedule: {}",
+        "queries: rounds {:?} (distinct, draws), final {} in {} draws",
+        from_log.rounds.iter().map(|r| (r.queries.len(), r.draws)).collect::<Vec<_>>(),
+        from_log.final_queries.len(),
+        from_log.final_draws
+    );
+    eprintln!(
+        "{num_vars} vars -> {} padded, {} rounds {:?}, final sumcheck {}, final queries {}\n\
+         transcript: {observed} observes, {sampled} samples over {} ops\nschedule: {}",
+        pcs.config.num_variables,
+        pcs.config.n_rounds(),
+        pcs.config.round_parameters,
+        pcs.config.final_sumcheck_rounds,
+        pcs.config.final_queries,
         ch.log.len(),
         runs(&ch.log)
     );
