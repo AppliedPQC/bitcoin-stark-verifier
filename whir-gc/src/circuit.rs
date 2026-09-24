@@ -41,12 +41,12 @@ const INDEX_BYTES: usize = 8;
 // Bit helpers.
 // ---------------------------------------------------------------------------
 
-fn not<T: CircuitTrait>(b: &mut T, x: usize) -> usize {
+pub(crate) fn not<T: CircuitTrait>(b: &mut T, x: usize) -> usize {
     let one = b.one();
     b.xor_wire(x, one)
 }
 
-fn or_all<T: CircuitTrait>(b: &mut T, xs: &[usize]) -> usize {
+pub(crate) fn or_all<T: CircuitTrait>(b: &mut T, xs: &[usize]) -> usize {
     let mut acc = b.zero();
     for &x in xs {
         acc = b.or_wire(acc, x);
@@ -54,7 +54,7 @@ fn or_all<T: CircuitTrait>(b: &mut T, xs: &[usize]) -> usize {
     acc
 }
 
-fn and_all<T: CircuitTrait>(b: &mut T, xs: &[usize]) -> usize {
+pub(crate) fn and_all<T: CircuitTrait>(b: &mut T, xs: &[usize]) -> usize {
     let mut acc = b.one();
     for &x in xs {
         acc = b.and_wire(acc, x);
@@ -63,7 +63,7 @@ fn and_all<T: CircuitTrait>(b: &mut T, xs: &[usize]) -> usize {
 }
 
 /// 1 iff the two wire vectors carry the same bits.
-fn equal<T: CircuitTrait>(b: &mut T, x: &[usize], y: &[usize]) -> usize {
+pub(crate) fn equal<T: CircuitTrait>(b: &mut T, x: &[usize], y: &[usize]) -> usize {
     assert_eq!(x.len(), y.len());
     let diff: Vec<usize> = x.iter().zip(y).map(|(&p, &q)| b.xor_wire(p, q)).collect();
     let any = or_all(b, &diff);
@@ -71,7 +71,7 @@ fn equal<T: CircuitTrait>(b: &mut T, x: &[usize], y: &[usize]) -> usize {
 }
 
 /// `sel ? y : x`, bit by bit: `x ⊕ (sel ∧ (x ⊕ y))`, one AND per bit.
-fn mux<T: CircuitTrait>(b: &mut T, sel: usize, x: &[usize], y: &[usize]) -> Vec<usize> {
+pub(crate) fn mux<T: CircuitTrait>(b: &mut T, sel: usize, x: &[usize], y: &[usize]) -> Vec<usize> {
     assert_eq!(x.len(), y.len());
     x.iter()
         .zip(y)
@@ -83,22 +83,22 @@ fn mux<T: CircuitTrait>(b: &mut T, sel: usize, x: &[usize], y: &[usize]) -> Vec<
         .collect()
 }
 
-fn bytes_to_wires(bytes: &[Byte]) -> Vec<usize> {
+pub(crate) fn bytes_to_wires(bytes: &[Byte]) -> Vec<usize> {
     bytes.iter().flat_map(|b| b.iter().copied()).collect()
 }
 
-fn wires_to_bytes(wires: &[usize]) -> Vec<Byte> {
+pub(crate) fn wires_to_bytes(wires: &[usize]) -> Vec<Byte> {
     assert_eq!(wires.len() % 8, 0);
     wires.chunks(8).map(|c| c.try_into().expect("8 wires")).collect()
 }
 
-fn const_bytes<T: CircuitTrait>(b: &mut T, bytes: &[u8]) -> Vec<Byte> {
+pub(crate) fn const_bytes<T: CircuitTrait>(b: &mut T, bytes: &[u8]) -> Vec<Byte> {
     let zero = b.zero();
     let one = b.one();
     bytes.iter().map(|&v| core::array::from_fn(|i| if (v >> i) & 1 == 1 { one } else { zero })).collect()
 }
 
-fn elem_bits(x: F) -> Vec<bool> {
+pub(crate) fn elem_bits(x: F) -> Vec<bool> {
     let v = x.to_repr();
     (0..128).map(|i| (v >> i) & 1 == 1).collect()
 }
@@ -140,29 +140,39 @@ pub struct Inputs {
     pub witness: Vec<bool>,
 }
 
+/// Fresh input wires carrying `bytes`, their bits appended to `witness`.
+pub(crate) fn alloc_bytes<T: ValuedBuilder>(b: &mut T, witness: &mut Vec<bool>, bytes: &[u8]) -> Vec<Byte> {
+    bytes
+        .iter()
+        .map(|&v| {
+            let w: Byte = b.fresh();
+            for (i, &wire) in w.iter().enumerate() {
+                let bit = (v >> i) & 1 == 1;
+                b.set_input(wire, bit);
+                witness.push(bit);
+            }
+            w
+        })
+        .collect()
+}
+
+/// A fresh input element carrying `x`, its bits appended to `witness`.
+pub(crate) fn alloc_elem<T: ValuedBuilder>(b: &mut T, witness: &mut Vec<bool>, x: F) -> Elem {
+    let w = tower::fresh(b, 128);
+    for (&wire, bit) in w.iter().zip(elem_bits(x)) {
+        b.set_input(wire, bit);
+        witness.push(bit);
+    }
+    w
+}
+
 impl Inputs {
     fn bytes<T: ValuedBuilder>(&mut self, b: &mut T, bytes: &[u8]) -> Vec<Byte> {
-        bytes
-            .iter()
-            .map(|&v| {
-                let w: Byte = b.fresh();
-                for (i, &wire) in w.iter().enumerate() {
-                    let bit = (v >> i) & 1 == 1;
-                    b.set_input(wire, bit);
-                    self.witness.push(bit);
-                }
-                w
-            })
-            .collect()
+        alloc_bytes(b, &mut self.witness, bytes)
     }
 
     fn elem<T: ValuedBuilder>(&mut self, b: &mut T, x: F) -> Elem {
-        let w = tower::fresh(b, 128);
-        for (&wire, bit) in w.iter().zip(elem_bits(x)) {
-            b.set_input(wire, bit);
-            self.witness.push(bit);
-        }
-        w
+        alloc_elem(b, &mut self.witness, x)
     }
 
     fn sumcheck<T: ValuedBuilder>(&mut self, b: &mut T, rounds: &[reference::SumcheckRoundData], pow_bits: usize) -> Vec<SumcheckInputs> {
@@ -237,25 +247,25 @@ impl Inputs {
 /// `HashChallenger<u8, Blake3, 32>` over wires: the input buffer is hashed
 /// whole on refill, the digest chains into the input, and bytes are popped
 /// from the digest's end.
-struct Sponge {
+pub struct Sponge {
     input: Vec<Byte>,
     output: Vec<Byte>,
     pub flushes: usize,
 }
 
 impl Sponge {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { input: Vec::new(), output: Vec::new(), flushes: 0 }
     }
 
-    fn observe(&mut self, bytes: &[Byte]) {
+    pub(crate) fn observe(&mut self, bytes: &[Byte]) {
         if !bytes.is_empty() {
             self.output.clear();
             self.input.extend_from_slice(bytes);
         }
     }
 
-    fn sample<T: CircuitTrait>(&mut self, b: &mut T) -> Byte {
+    pub(crate) fn sample<T: CircuitTrait>(&mut self, b: &mut T) -> Byte {
         if self.output.is_empty() {
             let digest = blake3::hash_bytes(b, &self.input);
             self.flushes += 1;
@@ -265,26 +275,26 @@ impl Sponge {
         self.output.pop().expect("refilled")
     }
 
-    fn sample_bytes<T: CircuitTrait>(&mut self, b: &mut T, n: usize) -> Vec<Byte> {
+    pub(crate) fn sample_bytes<T: CircuitTrait>(&mut self, b: &mut T, n: usize) -> Vec<Byte> {
         (0..n).map(|_| self.sample(b)).collect()
     }
 
-    fn observe_elem(&mut self, x: &Elem) {
+    pub(crate) fn observe_elem(&mut self, x: &Elem) {
         self.observe(&wires_to_bytes(x));
     }
 
-    fn sample_elem<T: CircuitTrait>(&mut self, b: &mut T) -> Elem {
+    pub(crate) fn sample_elem<T: CircuitTrait>(&mut self, b: &mut T) -> Elem {
         bytes_to_wires(&self.sample_bytes(b, ELEM_BYTES))
     }
 
     /// The low `bits` of an 8-byte draw, as wires.
-    fn sample_bits<T: CircuitTrait>(&mut self, b: &mut T, bits: usize) -> Vec<usize> {
+    pub(crate) fn sample_bits<T: CircuitTrait>(&mut self, b: &mut T, bits: usize) -> Vec<usize> {
         let bytes = self.sample_bytes(b, INDEX_BYTES);
         bytes_to_wires(&bytes)[..bits].to_vec()
     }
 
     /// `check_witness`: absorb the witness; 1 iff `bits` sampled bits are zero.
-    fn check_witness<T: CircuitTrait>(&mut self, b: &mut T, bits: usize, witness: &Elem) -> Option<usize> {
+    pub(crate) fn check_witness<T: CircuitTrait>(&mut self, b: &mut T, bits: usize, witness: &Elem) -> Option<usize> {
         if bits == 0 {
             return None;
         }
@@ -299,11 +309,11 @@ impl Sponge {
 // Field arithmetic on wires.
 // ---------------------------------------------------------------------------
 
-fn one_elem<T: CircuitTrait>(b: &mut T) -> Elem {
+pub(crate) fn one_elem<T: CircuitTrait>(b: &mut T) -> Elem {
     tower::constant(b, 1, 128)
 }
 
-fn zero_elem<T: CircuitTrait>(b: &mut T) -> Elem {
+pub(crate) fn zero_elem<T: CircuitTrait>(b: &mut T) -> Elem {
     tower::constant(b, 0, 128)
 }
 
@@ -319,7 +329,7 @@ fn expand_univariate<T: CircuitTrait>(b: &mut T, y: &Elem, m: usize) -> Vec<Elem
 }
 
 /// `eq(p, r) = prod (1 + p_i + r_i)`, Plonky3's `eval_eq` in characteristic two.
-fn eq_eval<T: CircuitTrait>(b: &mut T, p: &[Elem], r: &[Elem]) -> Elem {
+pub(crate) fn eq_eval<T: CircuitTrait>(b: &mut T, p: &[Elem], r: &[Elem]) -> Elem {
     assert_eq!(p.len(), r.len());
     let one = one_elem(b);
     let mut acc = one.clone();
@@ -346,7 +356,7 @@ fn select_point_weight<T: CircuitTrait>(b: &mut T, p: &[Elem], r: &[Elem]) -> El
 }
 
 /// `extrapolate_01inf(c0, claim − c0, c_inf, r)`.
-fn sumcheck_round<T: CircuitTrait>(b: &mut T, claim: &Elem, c0: &Elem, c_inf: &Elem, r: &Elem) -> Elem {
+pub(crate) fn sumcheck_round<T: CircuitTrait>(b: &mut T, claim: &Elem, c0: &Elem, c_inf: &Elem, r: &Elem) -> Elem {
     let one = one_elem(b);
     let one_minus_r = tower::add(b, &one, r);
     let e1 = tower::add(b, claim, c0);
@@ -360,7 +370,7 @@ fn sumcheck_round<T: CircuitTrait>(b: &mut T, claim: &Elem, c0: &Elem, c_inf: &E
 }
 
 /// `eval_multilinear`: fold the last variable first, `a + x·(b − a)`.
-fn eval_multilinear<T: CircuitTrait>(b: &mut T, evals: &[Elem], point: &[Elem]) -> Elem {
+pub(crate) fn eval_multilinear<T: CircuitTrait>(b: &mut T, evals: &[Elem], point: &[Elem]) -> Elem {
     assert_eq!(evals.len(), 1 << point.len());
     let mut cur: Vec<Elem> = evals.to_vec();
     for x in point.iter().rev() {
@@ -391,7 +401,7 @@ fn eval_coefficients<T: CircuitTrait>(b: &mut T, coeffs: &[Elem], point: &[Elem]
 }
 
 /// `claim += sum chi^(shift+i) e_i`.
-fn combine_into<T: CircuitTrait>(b: &mut T, claim: &mut Elem, chi: &Elem, shift: usize, evals: &[Elem]) {
+pub(crate) fn combine_into<T: CircuitTrait>(b: &mut T, claim: &mut Elem, chi: &Elem, shift: usize, evals: &[Elem]) {
     let mut power = one_elem(b);
     for _ in 0..shift {
         power = tower::mul(b, &power, chi);
@@ -446,6 +456,7 @@ struct RoundWires {
 }
 
 struct TranscriptWires {
+    given_points: Vec<Vec<Elem>>,
     initial_ood_points: Vec<Elem>,
     opening_points: Vec<Elem>,
     alpha: Elem,
@@ -516,7 +527,21 @@ fn sumcheck_rounds<T: CircuitTrait>(
     (polys, folding)
 }
 
-fn transcript<T: CircuitTrait>(b: &mut T, inputs: &Inputs, cfg: &Config, d: &Data) -> (TranscriptWires, Messages, usize) {
+/// What a layer in front of the opening hands over: the claims' given points
+/// and the values it bound them to (checked equal to the claimed openings).
+pub struct PrefixOut {
+    pub points: Vec<Vec<Elem>>,
+    pub values: Vec<Vec<Elem>>,
+}
+
+fn transcript<T: CircuitTrait>(
+    b: &mut T,
+    inputs: &Inputs,
+    cfg: &Config,
+    d: &Data,
+    prefix: impl FnOnce(&mut T, &mut Sponge, &mut Vec<usize>) -> PrefixOut,
+    checks: &mut Vec<usize>,
+) -> (TranscriptWires, Messages, usize) {
     let mut s = Sponge::new();
     let mut pow_checks = Vec::new();
 
@@ -524,6 +549,14 @@ fn transcript<T: CircuitTrait>(b: &mut T, inputs: &Inputs, cfg: &Config, d: &Dat
     s.observe(&seed);
     let root = inputs.root.clone();
     s.observe(&root);
+    let PrefixOut { points: given_points, values: given_values } = prefix(b, &mut s, checks);
+    assert_eq!(given_points.len(), if cfg.given_points { inputs.openings.len() } else { 0 });
+    for (ws, vs) in inputs.openings.iter().zip(&given_values) {
+        assert_eq!(ws.len(), vs.len());
+        for (w, v) in ws.iter().zip(vs) {
+            checks.push(equal(b, w, v));
+        }
+    }
     let mut initial_ood_points = Vec::new();
     for (a, seed) in inputs.initial_ood_answers.iter().zip(&d.seed_virtual) {
         let seed = const_bytes(b, seed);
@@ -536,7 +569,7 @@ fn transcript<T: CircuitTrait>(b: &mut T, inputs: &Inputs, cfg: &Config, d: &Dat
     for (ws, seed) in inputs.openings.iter().zip(&d.seed_claim) {
         let seed = const_bytes(b, seed);
         s.observe(&seed);
-        opening_points.push(s.sample_elem(b));
+        opening_points.push(if cfg.given_points { zero_elem(b) } else { s.sample_elem(b) });
         for w in ws {
             s.observe_elem(w);
         }
@@ -589,6 +622,7 @@ fn transcript<T: CircuitTrait>(b: &mut T, inputs: &Inputs, cfg: &Config, d: &Dat
         sumcheck_rounds(b, &mut s, &inputs.final_sumcheck, cfg.final_folding_pow_bits, &mut pow_checks);
 
     let wires = TranscriptWires {
+        given_points,
         initial_ood_points,
         opening_points,
         alpha,
@@ -629,7 +663,7 @@ impl Profile {
     }
 
     /// Charge the non-free gates since the last mark to `name`.
-    fn mark<T: CircuitTrait>(&mut self, b: &T, name: &'static str) {
+    pub(crate) fn mark<T: CircuitTrait>(&mut self, b: &T, name: &'static str) {
         let now = Self::non_free(b);
         let delta = now - self.last;
         self.last = now;
@@ -747,26 +781,50 @@ pub fn build(cfg: &Config, d: &Data) -> Built {
 pub fn build_with<T: ValuedBuilder>(b: &mut T, cfg: &Config, d: &Data) -> Shape {
     // The reference run, for the query indices the expanded paths need.
     let ch = reference::transcript(cfg, d, &mut reference::Challenger::new());
+    build_with_prefix(b, cfg, d, &ch, |_, _, _, _| PrefixOut { points: Vec::new(), values: Vec::new() })
+}
 
+/// Build with a layer in front of the opening: `prefix` runs on the sponge
+/// after the commitment is absorbed, may push its own checks and profile
+/// marks, and hands over the claims' given points and values. Its inputs
+/// must have been allocated before this call, and `ch` must be the
+/// reference run of the same prefix.
+pub fn build_with_prefix<T: ValuedBuilder>(
+    b: &mut T,
+    cfg: &Config,
+    d: &Data,
+    ch: &reference::Challenges,
+    prefix: impl FnOnce(&mut T, &mut Sponge, &mut Vec<usize>, &mut Profile) -> PrefixOut,
+) -> Shape {
     let mut profile = Profile::default();
-    let inputs = Inputs::allocate(b, cfg, d, &ch);
-    let (t, m, flushes) = transcript(b, &inputs, cfg, d);
+    let inputs = Inputs::allocate(b, cfg, d, ch);
+    let mut checks: Vec<usize> = Vec::new();
+    let (t, m, flushes) = {
+        let profile_ref = &mut profile;
+        let prefix = |b: &mut T, s: &mut Sponge, checks: &mut Vec<usize>| prefix(b, s, checks, profile_ref);
+        transcript(b, &inputs, cfg, d, prefix, &mut checks)
+    };
     profile.mark(b, "transcript (sponge)");
-    let mut checks: Vec<usize> = t.pow_checks.clone();
+    checks.extend(t.pow_checks.iter().copied());
 
     // The initial constraint and claim.
     let mut eq_groups: Vec<Vec<Vec<Elem>>> = Vec::new();
     let mut eval_groups: Vec<Vec<Elem>> = Vec::new();
-    for ((shape, y), evals) in cfg.claims.iter().zip(&t.opening_points).zip(&m.openings) {
-        let row = expand_univariate(b, y, shape.row_vars);
-        let points: Vec<Vec<Elem>> = shape
-            .selectors
-            .iter()
-            .map(|sel| {
-                let sel_wires: Vec<Elem> = sel.iter().map(|&c| tower::constant(b, c.to_repr(), 128)).collect();
-                sel_wires.into_iter().chain(row.iter().cloned()).collect()
-            })
-            .collect();
+    for (i, ((shape, y), evals)) in cfg.claims.iter().zip(&t.opening_points).zip(&m.openings).enumerate() {
+        let points: Vec<Vec<Elem>> = if cfg.given_points {
+            assert_eq!(shape.selectors, vec![Vec::<F>::new()], "a given point names the whole polynomial");
+            vec![t.given_points[i].clone()]
+        } else {
+            let row = expand_univariate(b, y, shape.row_vars);
+            shape
+                .selectors
+                .iter()
+                .map(|sel| {
+                    let sel_wires: Vec<Elem> = sel.iter().map(|&c| tower::constant(b, c.to_repr(), 128)).collect();
+                    sel_wires.into_iter().chain(row.iter().cloned()).collect()
+                })
+                .collect()
+        };
         eq_groups.push(points);
         eval_groups.push(evals.clone());
     }

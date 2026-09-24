@@ -160,6 +160,10 @@ pub struct ClaimShape {
 pub struct Config {
     pub num_variables: usize,
     pub commitment_ood_samples: usize,
+    /// The claims' points are given by the layer in front (the STARK's ring
+    /// switch), not sampled: each claim observes its evaluations only, and
+    /// its eq point is the given point itself.
+    pub given_points: bool,
     pub claims: Vec<ClaimShape>,
     pub initial_folding: usize,
     pub initial_folding_pow_bits: usize,
@@ -227,6 +231,8 @@ pub struct RoundChallenges {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Challenges {
+    /// The claim points a prefix handed over, when `Config::given_points`.
+    pub given_points: Vec<Vec<F>>,
     pub initial_ood_points: Vec<F>,
     pub opening_points: Vec<F>,
     pub alpha: F,
@@ -293,9 +299,23 @@ fn sumcheck_rounds<S: Sponge>(
 
 /// Drive `s` through the verifier's transcript and collect what it draws.
 pub fn transcript<S: Sponge>(cfg: &Config, d: &Data, s: &mut S) -> Challenges {
+    transcript_with(cfg, d, s, |_| Vec::new())
+}
+
+/// The transcript with a layer in front: `prefix` runs after the commitment
+/// is absorbed and before the OOD draws, and returns the claim points it
+/// binds (one per claim when `cfg.given_points`, none otherwise).
+pub fn transcript_with<S: Sponge>(
+    cfg: &Config,
+    d: &Data,
+    s: &mut S,
+    prefix: impl FnOnce(&mut S) -> Vec<Vec<F>>,
+) -> Challenges {
     let mut pow_ok = true;
     s.observe_bytes(&d.seed_commitment);
     s.observe_bytes(&d.cap);
+    let given_points = prefix(s);
+    assert_eq!(given_points.len(), if cfg.given_points { d.openings.len() } else { 0 });
     assert_eq!(d.initial_ood_answers.len(), cfg.commitment_ood_samples);
     assert_eq!(d.seed_virtual.len(), cfg.commitment_ood_samples);
     let initial_ood_points = d
@@ -316,7 +336,7 @@ pub fn transcript<S: Sponge>(cfg: &Config, d: &Data, s: &mut S) -> Challenges {
         .zip(&d.seed_claim)
         .map(|(evals, seed)| {
             s.observe_bytes(seed);
-            let point = s.sample_elem();
+            let point = if cfg.given_points { F::ZERO } else { s.sample_elem() };
             for &e in evals {
                 s.observe_elem(e);
             }
@@ -371,7 +391,7 @@ pub fn transcript<S: Sponge>(cfg: &Config, d: &Data, s: &mut S) -> Challenges {
         cfg.final_folding_pow_bits,
         &mut pow_ok,
     );
-    Challenges { initial_ood_points, opening_points, alpha, initial_folding, rounds, final_queries, final_folding, pow_ok }
+    Challenges { given_points, initial_ood_points, opening_points, alpha, initial_folding, rounds, final_queries, final_folding, pow_ok }
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +583,12 @@ pub struct Verified {
 
 /// The verifier: the transcript, then the arithmetic.
 pub fn verify(cfg: &Config, d: &Data) -> Result<Verified, Error> {
-    let ch = transcript(cfg, d, &mut Challenger::new());
+    verify_with(cfg, d, |_| Vec::new())
+}
+
+/// The verifier with a layer in front of the opening; see [`transcript_with`].
+pub fn verify_with(cfg: &Config, d: &Data, prefix: impl FnOnce(&mut Challenger) -> Vec<Vec<F>>) -> Result<Verified, Error> {
+    let ch = transcript_with(cfg, d, &mut Challenger::new(), prefix);
     if !ch.pow_ok {
         return Err(Error::Pow);
     }
@@ -571,13 +596,14 @@ pub fn verify(cfg: &Config, d: &Data) -> Result<Verified, Error> {
     // The initial constraint: opening claims, then the OOD claims, under alpha.
     let mut statements = Vec::new();
     let mut groups: Vec<Vec<F>> = Vec::new();
-    for ((shape, &y), evals) in cfg.claims.iter().zip(&ch.opening_points).zip(&d.openings) {
-        let row = expand_univariate(y, shape.row_vars);
-        let points: Vec<Vec<F>> = shape
-            .selectors
-            .iter()
-            .map(|sel| sel.iter().copied().chain(row.iter().copied()).collect())
-            .collect();
+    for (i, ((shape, &y), evals)) in cfg.claims.iter().zip(&ch.opening_points).zip(&d.openings).enumerate() {
+        let points: Vec<Vec<F>> = if cfg.given_points {
+            assert_eq!(shape.selectors, vec![Vec::<F>::new()], "a given point names the whole polynomial");
+            vec![ch.given_points[i].clone()]
+        } else {
+            let row = expand_univariate(y, shape.row_vars);
+            shape.selectors.iter().map(|sel| sel.iter().copied().chain(row.iter().copied()).collect()).collect()
+        };
         assert!(points.iter().all(|p| p.len() == cfg.num_variables));
         statements.push(Statement::Eq(points));
         groups.push(evals.clone());

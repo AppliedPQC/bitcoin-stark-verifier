@@ -260,6 +260,7 @@ fn inputs(run: &Run) -> (reference::Config, reference::Data) {
     let cfg = reference::Config {
         num_variables: k,
         commitment_ood_samples: c.commitment_ood_samples(),
+        given_points: false,
         claims: vec![reference::ClaimShape { row_vars: k, selectors: vec![vec![]] }],
         initial_folding: c.round_folding_factor(0),
         initial_folding_pow_bits: c.starting_folding_pow_bits(),

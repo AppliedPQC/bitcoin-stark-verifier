@@ -180,6 +180,50 @@ multiplications per fold overtake the shorter paths. Halving the rate buys
 10% fewer gates for a prover domain twice the size and much more grinding.
 Rate 1/32 with folding 4 is the configuration to carry forward.
 
+## The full STARK verifier, measured
+
+`stark` and `stark_circuit` put Plonky3's `p3-multi-stark` layers in front of
+the WHIR opening, as the Boolean WHIR trace commitment runs them: the
+zerocheck of the AIR (alpha, beta, tau; a degree-4 generic sumcheck over the
+row variables; the constraints evaluated at the bound point from the opened
+current and next rows, Horner-batched under alpha, against `eq(tau, r)`), the
+batching of the opened columns into one bit-level claim (the column point,
+`combine_columns` on both rows), and the bit ring switch (the 128-row tensor
+and, above 2^7 rows, its carry and last tensors; the batched sumcheck; the
+closing weight from the tensor algebra's equality and successor elements)
+whose surviving point WHIR then opens as a given claim. The AIR comes in as
+Plonky3's symbolic constraints and is evaluated on wires.
+
+`tests/keccak_stark.rs` proves Keccak-f permutations (the 1,625-column
+characteristic-2 AIR, booleanity assumed since the commitment is to bits)
+through this crate's own `MultiStarkConfig` under a byte-logging challenger,
+has the reference replay Plonky3's verifier byte for byte, then streams the
+full circuit through the garbler. Rate 1/32, folding 4, terminal security
+110, Blake3 everywhere:
+
+| trace | packed variables | non-free gates | garbled | garble | inputs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2^5 rows (1 Keccak-f) | 9 | 44,573,121 | 713 MB | 25 s | 586,240 bits |
+| 2^8 rows (10 Keccak-f) | 12 | 66,459,859 | 1,063 MB | 37 s | 743,808 bits |
+| 2^12 rows (163 Keccak-f) | 16 | 77,736,394 | 1,243 MB | 43 s | 874,240 bits |
+
+Each accepts its proof and rejects it with an opened value changed. Where the
+2^12 circuit's gates go:
+
+| phase | non-free gates | share |
+| --- | ---: | ---: |
+| ring switch closing (equality, carry and last elements: 256 multiplications per coordinate) | 24,686,734 | 31.8% |
+| column combination (a 2^11 eq table and two 1,625-term dot products) | 11,582,352 | 14.9% |
+| AIR constraints (1,650 constraints, Horner under alpha) | 10,709,866 | 13.8% |
+| STARK transcript (absorbing 3,250 opened values and the tensors) | 10,438,166 | 13.4% |
+| WHIR: paths, leaves, folds, weights, transcript | 18,500,000 | 23.8% |
+| zerocheck sumcheck, ring switch statement, closing checks | 1,800,000 | 2.3% |
+
+The column count sets three of the four big items: the STARK transcript, the
+combination and the constraints all grow with it. The ring switch closing
+grows with the packed variables (256 multiplications each) plus a fixed
+11 × 512 for the column selector.
+
 ## Plan
 
 1. Done: `reference`, checked op for op against the logged run and accepting
