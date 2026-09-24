@@ -205,6 +205,17 @@ fn prove_and_log(p: &Params) -> Run {
     let proof = prove(&cfg, instances, 0, &mut ch).expect("prove");
     eprintln!("proved 2^{} rows ({num_hashes} Keccak-f) in {:.1?}", p.log_height, t.elapsed());
 
+    let bytes = postcard::to_allocvec(&proof).expect("serialize");
+    let opened = proof.opening.values.len() * 16;
+    let whir_bytes = postcard::to_allocvec(&proof.opening.opening.opening).expect("serialize").len();
+    eprintln!(
+        "proof: {} bytes ({:.1} KiB): opened values {} B, WHIR opening {} B, ring switch and zerocheck {} B",
+        bytes.len(),
+        bytes.len() as f64 / 1024.0,
+        opened,
+        whir_bytes,
+        bytes.len() - opened - whir_bytes
+    );
     let (mut ch, log) = challenger(true);
     let instances = VerifierInstances::new(vec![VerifierInstance::new(&air, &vk, p.log_height, &[])]);
     verify(&cfg, instances, &proof, 0, &mut ch).expect("Plonky3's verifier must accept its own proof");
