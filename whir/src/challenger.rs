@@ -60,6 +60,28 @@ pub fn sample_ef(j: usize) -> Script {
     }
 }
 
+/// An extension challenge the way Plonky3 draws it: four rate slots from the
+/// end, `rate[hi]` first, then `rate[hi-1]`, `rate[hi-2]`, `rate[hi-3]`.
+///
+/// [`sample_ef`] reads a group of four *forward*, which the reference sponge
+/// also did; but `DuplexChallenger::sample::<EF>` `pop()`s the rate from the
+/// back, so its coefficients are those four slots in descending order. `hi` is
+/// the highest unread slot: `7` for the first EF drawn from a permutation, `3`
+/// for the second, which is how two EFs come out of one squeeze.
+///
+/// Each pick reaches one slot lower and one item deeper, since the previous pick
+/// left its copy on top -- the two offsets cancel, so this is four picks at a
+/// walking depth rather than a constant one.
+pub fn sample_ef_pop(hi: usize) -> Script {
+    assert!(hi < RATE && hi >= 3);
+    script! {
+        { sample(hi) }
+        { sample_at(hi - 1, 1) }
+        { sample_at(hi - 2, 2) }
+        { sample_at(hi - 3, 3) }
+    }
+}
+
 /// `sample_bits`: rate slot `j`, masked to its low `bits` bits.
 ///
 /// The mask is where an `OP_MOD` would go if script had one. It does not, so

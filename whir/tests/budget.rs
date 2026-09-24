@@ -37,6 +37,16 @@ fn derive(
     security_level: usize,
     pow_bits: usize,
 ) -> Result<(Config, Vec<usize>), String> {
+    derive_under(num_variables, security_level, pow_bits, SecurityAssumption::CapacityBound)
+}
+
+/// The same, under a named soundness assumption.
+fn derive_under(
+    num_variables: usize,
+    security_level: usize,
+    pow_bits: usize,
+    soundness_type: SecurityAssumption,
+) -> Result<(Config, Vec<usize>), String> {
     let folding_factor = FoldingFactor::Constant(4);
     // One rate per round, and the recurrence is WHIR's: folding k variables
     // multiplies the rate by 2^(1-k), so log(1/rate) grows by k-1. Writing it
@@ -55,7 +65,7 @@ fn derive(
         pow_bits,
         round_log_inv_rates: rates,
         folding_factor,
-        soundness_type: SecurityAssumption::CapacityBound,
+        soundness_type,
         starting_log_inv_rate: 4,
     };
     // `pow_bits: 0` is not always satisfiable: WHIR trades query count against
@@ -65,7 +75,7 @@ fn derive(
         WhirConfig::new(num_variables, params).map_err(|e| format!("{e:?}"))?;
 
     let rounds: Vec<Round> = cfg
-        .round_parameters
+        .round_parameters()
         .iter()
         .map(|r| Round {
             folding_factor: r.folding_factor,
@@ -75,25 +85,29 @@ fn derive(
             // One row is the 2^folding_factor values of the fibre, as extension
             // elements -- four base elements each.
             row_len: 4 * (1 << r.folding_factor),
+            // Plonky3 derives this per round; the cost model only needs the
+            // exponent's bit width, which `log_domain_size` already gives.
+            domain_gen: 7,
         })
         .collect();
-    let last = cfg.round_parameters.last().expect("at least one round");
+    let last = cfg.round_parameters().last().expect("at least one round");
     let final_round = Round {
         folding_factor: 0,
-        num_queries: cfg.final_queries,
+        num_queries: cfg.terminal().num_queries,
         log_domain_size: last.domain_size.trailing_zeros() as usize - last.folding_factor,
         ood_samples: 0,
         row_len: 4 * (1 << last.folding_factor),
+        domain_gen: 7,
     };
-    let queries: Vec<usize> = cfg.round_parameters.iter().map(|r| r.num_queries).collect();
+    let queries: Vec<usize> = cfg.round_parameters().iter().map(|r| r.num_queries).collect();
     Ok((
         Config {
-            initial_folding_factor: cfg.folding_schedule[0],
-            initial_ood_samples: cfg.commitment_ood_samples,
+            initial_folding_factor: cfg.folding_schedule()[0],
+            initial_ood_samples: cfg.commitment_ood_samples(),
             rounds,
             final_round,
-            final_sumcheck_rounds: cfg.final_sumcheck_rounds,
-            final_poly_vars: cfg.final_sumcheck_rounds,
+            final_sumcheck_rounds: cfg.final_sumcheck_rounds(),
+            final_poly_vars: cfg.final_sumcheck_rounds(),
         },
         queries,
     ))
@@ -176,4 +190,145 @@ fn whole_verifier_against_a_block() {
         }
     }
     println!("\n  Query indices come {} per squeeze.\n", queries_per_squeeze());
+}
+
+/// How many chunks a BitVM2-style assertion would need.
+///
+/// The verifier is three hundred blocks and will never be executed on-chain.
+/// What can be is one *step* of it, if the prover commits to the state between
+/// steps and a challenger names the step it claims is wrong. So the number that
+/// matters is not the verifier's size but the step count, and whether a step
+/// relays.
+///
+/// A step is one Poseidon2 round, because a Merkle level is already too big:
+/// 572 252 bytes against 400 000 weight units. The rounds are what
+/// `permutation::rounds()` emits and what `rounds_compose_to_the_permutation`
+/// pins to `permute()`.
+///
+/// The step measured here is the *committed* one — both its states taken from
+/// Winternitz signatures rather than from the witness. An uncommitted step is
+/// smaller and is not a disprove: a spender would pick whichever pair of states
+/// makes the predicate fire.
+#[test]
+fn chunk_count_for_a_disprove() {
+    let bare = poseidon2::disprove::largest_round();
+    let step = poseidon2::disprove::largest_committed_round();
+    let per_perm = poseidon2::disprove::rounds_per_permutation();
+    // A chunk commits only its two endpoints, so its length is decided by what
+    // still relays rather than by paying the commitment once per round.
+    let chunk_len = poseidon2::disprove::max_chunk_len(STANDARD_TX_WU);
+    let chunk = poseidon2::disprove::largest_chunk(chunk_len);
+    let chunks_per_perm = per_perm.div_ceil(chunk_len);
+
+    println!("\n  disprove chunking, one step = one Poseidon2 round");
+    println!("  ------------------------------------------------");
+    println!("  the round alone            {bare:>12} B");
+    println!("  a committed step           {step:>12} B  ({:.1}% of a standard tx)",
+             100.0 * step as f64 / STANDARD_TX_WU as f64);
+    println!("  of which the signatures    {:>12} B  ({:.0}%)",
+             step - bare, 100.0 * (step - bare) as f64 / step as f64);
+    println!("  a chunk of {chunk_len} rounds      {chunk:>12} B  ({:.1}% of a standard tx)",
+             100.0 * chunk as f64 / STANDARD_TX_WU as f64);
+    println!("  chunks per permutation     {chunks_per_perm:>12}  (rather than {per_perm})");
+    println!();
+    println!("  security  pow   vars   permutations         steps        chunks   disprove");
+    println!("  --------------------------------------------------------------------------");
+    for &security in [100usize, 80].iter() {
+        for &vars in [16usize, 20, 24].iter() {
+            let (cfg, _) = match derive(vars, security, 22) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let perms = whir::verifier::permutation_count(&cfg);
+            let steps = perms * per_perm;
+            let chunks = perms * chunks_per_perm;
+            println!(
+                "  {security:>3} {:>6} {vars:>6} {perms:>14} {steps:>13} {chunks:>13} {:>10} B",
+                22, chunk,
+            );
+        }
+    }
+    println!("\n  A disprove spends one chunk. Everything else stays off-chain unless");
+    println!("  someone cheats, which is the whole of the trick.\n");
+
+    assert!(step < STANDARD_TX_WU, "a committed step does not relay");
+    assert!(chunk <= STANDARD_TX_WU, "the chosen chunk length does not relay");
+}
+
+/// What the chunking does *not* cover, stated rather than implied.
+///
+/// The permutations decompose because `rounds()` exists. The arithmetic between
+/// them -- the sumcheck rounds, the multilinear evaluation, the constraint
+/// weights -- does not, and it is 2% of the verifier. Two per cent of 1.24 GB is
+/// still 25 MB, which is sixty standard transactions' worth of script with no
+/// step boundaries in it.
+#[test]
+fn report_unchunked_arithmetic() {
+    let (cfg, _) = derive(20, 80, 22).expect("derivable");
+    let perms = whir::verifier::permutation_count(&cfg);
+    let one = poseidon2::permutation::permute().len();
+    let hashing = perms * one;
+    // The example configuration measures its own arithmetic share; reuse it as
+    // the estimate rather than inventing a second one.
+    let arithmetic = (hashing as f64 * 0.02) as usize;
+    println!(
+        "\n  hashing {hashing} B decomposes into {} steps;\n  \
+         arithmetic is about {arithmetic} B and decomposes into none.\n",
+        perms * poseidon2::disprove::rounds_per_permutation()
+    );
+}
+
+/// What the soundness regime costs, since the script does not know about it.
+///
+/// Nothing in `whir/src` or `poseidon2/src` mentions a soundness assumption.
+/// The script executes a schedule; which regime produced that schedule is a
+/// parameter of the *configuration*, and it reaches the script only as a query
+/// count. So switching regimes is a config change, and this is what it costs.
+///
+/// The default everywhere in this crate is `CapacityBound`, the cheapest of the
+/// three and the only one resting on the unproven half of WHIR's Conjecture
+/// 4.12. That is the papers' own benchmarking default and a defensible choice,
+/// but a verifier that settles bitcoin should be able to say what the proved
+/// alternative would cost rather than only that it is dearer.
+#[test]
+fn what_the_soundness_regime_costs() {
+    let one = perm_bytes();
+    let regimes = [
+        ("UD, proved       ", SecurityAssumption::UniqueDecoding),
+        ("JB, Conj. 4.12(1)", SecurityAssumption::JohnsonBound),
+        ("CB, Conj. 4.12(2)", SecurityAssumption::CapacityBound),
+    ];
+    println!("\n  soundness regime at 100-bit security");
+    println!("  -----------------------------------");
+    println!("  Each regime is given the grinding it needs rather than a shared");
+    println!("  budget: a weaker assumption wants more of both, and holding pow");
+    println!("  fixed would report 'not derivable' instead of a price.\n");
+    println!("  regime               vars   pow   queries(r0)   permutations        bytes   vs CB");
+    for &vars in [16usize, 20].iter() {
+        let mut baseline = None;
+        for (name, regime) in regimes.iter() {
+            // The smallest grinding budget the regime is derivable at.
+            let found = (0..64).find_map(|pow| {
+                derive_under(vars, 100, pow, *regime).ok().map(|v| (pow, v))
+            });
+            match found {
+                Some((pow, (cfg, queries))) => {
+                    let n = whir::verifier::permutation_count(&cfg);
+                    if matches!(regime, SecurityAssumption::CapacityBound) {
+                        baseline = Some(n);
+                    }
+                    println!(
+                        "  {name}  {vars:>5} {pow:>5} {:>13} {n:>14} {:>12} {}",
+                        queries[0],
+                        n * one,
+                        baseline.map_or(String::new(), |b| format!("{:>6.2}x", n as f64 / b as f64)),
+                    );
+                }
+                None => println!("  {name}  {vars:>5}   not derivable at any grinding budget"),
+            }
+        }
+        println!();
+    }
+    println!("  The script is identical in all three. Only the query count moves,");
+    println!("  and script weight moves with it.\n");
 }

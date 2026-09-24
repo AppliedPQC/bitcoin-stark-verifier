@@ -68,8 +68,8 @@
 \author{}
 \date{\small Subject: \texttt{AppliedPQC/bitcoin-stark-verifier}
   \quad$\cdot$\quad Sources: ePrint 2024/390, 2024/1586
-  \quad$\cdot$\quad 78 tests passing
-  \quad$\cdot$\quad D1 / D2 / D3 fixed, query constrained and threaded}
+  \quad$\cdot$\quad 98 tests passing
+  \quad$\cdot$\quad D1--D3 fixed; queries composed, threaded and closed}
 
 \begin{document}
 \maketitle
@@ -89,14 +89,15 @@
   Fiat--Shamir challenges were never derived (\textbf{D1}), the closing identity was a tautology
   (\textbf{D2}), and the composed \texttt{verify()} was a cost model that was never executed
   (\textbf{D3}). All three are fixed, with adversarial tests.
-  \item \textbf{The repair was cost-negative.} Deriving challenges in script replaced a spurious
-  second permutation per sumcheck round with a correct single one. Transcript cost fell from
-  \textbf{67 to 44} permutations (predicted $\approx$46) --- 5.0\% of total script weight down to
-  \textbf{3.3\%} --- against 1300 permutations of Merkle work, unchanged.
-  \item \textbf{The query is now constrained.} The opened row is bound to its leaf, a round's
-  answers are batched into the next target, and the accumulated constraints are now \emph{derived}
-  rather than supplied --- see \S15.5. The bookkeeping turned out to be nearly free, and finding
-  that out corrected two things this report had wrong.
+  \item \textbf{The cost is hashing, and almost nothing else.} The example configuration is 2162
+  permutations, of which \textbf{97.1\%} is query work --- Merkle paths and the leaf hash that binds
+  a row to them --- against 2.9\% for the whole transcript.
+  \item \textbf{The verifier ends on its identity, and derives everything in it.} The queries are
+  composed, their roots bound to the absorbed commitment, the folding randomness accumulated, and
+  the closing check $\texttt{claimed} = w(\boldsymbol R)\cdot\hat f_{M}(\boldsymbol
+  r_{\mathrm{fin}})$ emitted with its constraints \emph{derived from the transcript} rather than
+  supplied --- for 7.5\% of the verifier and no permutation at all. Only the statement is supplied,
+  because a statement is what a claim \emph{is}.
   \item \textbf{Two configuration levers remain unused}, worth roughly 20\% of script weight
   between them: \texttt{pow\_bits = 0} where both reference implementations use $\approx$22, and
   the choice of soundness regime, currently the conjectural one.
@@ -138,7 +139,7 @@ equality polynomial is
   \eqp(\boldsymbol b,\boldsymbol z).
 \]
 
-\section{Constrained Reed--Solomon codes}
+\section{Constrained Reed--Solomon codes}\label{sec:crs}
 
 WHIR's object of study is not $\RS$ but a subcode carrying one sumcheck-shaped constraint:
 \[
@@ -178,10 +179,10 @@ so the sum $\sum_{\boldsymbol b}\hat f(\boldsymbol b)\,w(\boldsymbol b)$ is a su
 over a \emph{product of two multilinears}. That is what fixes the degree of every round
 polynomial at two, which in turn is why a round sends three values --- and why, with
 $\hat h(0)+\hat h(1)=\sigma$ pinning one of them, only $\hat h(0)$ and $\hat h(\infty)$
-travel. The entire cost model of Section 12 follows from this one line.
+travel. The entire cost model of \S\ref{sec:cost} follows from this one line.
 
 \smallskip
-\noindent\textbf{(ii) Closed under the recursion.} Section 6's update
+\noindent\textbf{(ii) Closed under the recursion.} \S6's update
 \[
   \hat w'(Z,\boldsymbol X)=\hat w(Z,\boldsymbol\alpha,\boldsymbol X)
   + Z\cdot\sum_{i=0}^{t}\gamma^{\,i+1}\eqp(\boldsymbol z_{i},\boldsymbol X)
@@ -200,7 +201,7 @@ a \textbf{weighted sum of equality polynomials} --- that is, nothing more than a
 pairs $(c_{j},\boldsymbol z_{j})$. Every constraint the protocol ever accumulates, from
 the initial evaluation query through each round's out-of-domain answer and $t$ shift
 answers, is one entry in that list, and the coefficients $c_{j}$ are powers of the
-batching challenges. \S15 is about carrying that list, and \S15.4 is about what it
+batching challenges. \S\ref{sec:constrain} is about carrying that list, and \S\ref{sec:compose} is about what it
 costs to evaluate it.
 
 \subsection*{Evaluation as a special case}
@@ -219,14 +220,30 @@ For $\alpha\in\mathbb{F}$ and $y=x^{2}$,
   \Fold(f,\alpha)(x^{2}) \;=\; \frac{f(x)+f(-x)}{2}
   \;+\; \alpha\cdot\frac{f(x)-f(-x)}{2x},
 \]
-extended to $\boldsymbol\alpha$ by iteration. The structural fact is that folding is multilinear
-partial evaluation seen through the code: if $f\in\RS[\mathbb{F},\mathcal{L},m]$ then
+extended to $\boldsymbol\alpha=(\alpha_{1},\dots,\alpha_{k})$ by iteration. The structural fact is
+that folding is multilinear partial evaluation seen through the code: if
+$f\in\RS[\mathbb{F},\mathcal{L},m]$ then
 \[
   \Fold(f,\boldsymbol\alpha)\in\RS[\mathbb{F},\mathcal{L}^{(2^{k})},m-k],
   \qquad
-  \hat g(X_{k},\dots,X_{m})=\hat f(\boldsymbol\alpha,X_{k},\dots,X_{m}).
+  \hat g(X_{k+1},\dots,X_{m})=\hat f(\boldsymbol\alpha,X_{k+1},\dots,X_{m}).
   \tag{Claim 4.15}
 \]
+Three quantities move together, and it is worth reading $m-k$ as the count it is: binding the first
+$k$ variables to $\boldsymbol\alpha$ leaves $X_{k+1},\dots,X_{m}$ free, so the arity falls from $m$
+to $m-k$, the degree from $2^{m}$ to $2^{m-k}$, and the domain from $\mathcal{L}$ to
+$\mathcal{L}^{(2^{k})}$ of size $|\mathcal{L}|/2^{k}$.
+
+That third movement is the one to watch, because of what it does to the rate:
+\[
+  \rho=\frac{2^{m}}{|\mathcal{L}|}
+  \qquad\longrightarrow\qquad
+  \rho'=\frac{2^{m-k}}{|\mathcal{L}|/2^{k}}=\frac{2^{m}}{|\mathcal{L}|}=\rho .
+\]
+\textbf{Folding alone does not change the rate.} Claim 4.15 is the structural half of the story and
+says nothing about cost. The rate reduction of \S4 comes from somewhere else entirely --- from the
+prover re-committing $g$ on a domain that is merely \emph{halved} rather than divided by $2^{k}$ ---
+which is why that section is about a choice and this one is about an identity.
 
 \section{Rate is the design variable}
 
@@ -274,9 +291,32 @@ $t$ shift queries, and forms the next function as a quotient:
   \mathrm{Quotient}(f,S,\mathrm{Ans},\mathrm{Fill})(x)
   =\frac{f(x)-\widehat{\mathrm{Ans}}(x)}{\hat V_{S}(x)}\qquad (x\notin S).
 \]
-Quotienting by a \emph{wrong} value pushes the result far from low degree (Lemma 4.4). The price is
-that the degree drops by $|\mathcal{G}|$, so the round closes with degree correction --- a geometric
-sum evaluated in $O(\log e)$ operations by repeated squaring.
+Two of those symbols carry the whole mechanism. $S=\{z_{0},z_{1},\dots,z_{t}\}$ is the out-of-domain
+sample together with the shift points; $\widehat{\mathrm{Ans}}$ interpolates the values the verifier
+computed \emph{for itself} at those points; and
+\[
+  \hat V_{S}(X)=\prod_{z\in S}(X-z)
+\]
+is the \emph{vanishing polynomial} of $S$ --- monic, of degree $|S|=t+1$, zero exactly on $S$.
+
+The quotient is a polynomial only when the numerator vanishes wherever the denominator does, so
+\begin{align*}
+  \frac{g-\widehat{\mathrm{Ans}}}{\hat V_{S}}\ \text{is a polynomial}
+  \;&\Longleftrightarrow\;
+  g-\widehat{\mathrm{Ans}}\ \text{vanishes on } S\\
+  \;&\Longleftrightarrow\;
+  g\ \text{carries the verifier's answers at } S.
+\end{align*}
+That equivalence \emph{is} the enforcement. Nobody checks the answers directly; the division either
+comes out clean or it does not, and when it does not the result is not slightly wrong but far from
+low degree (Lemma 4.4) --- so the next round's proximity test, which was running anyway, rejects it.
+A lie is converted into a distance the existing machinery already measures.
+
+Two consequences follow from $\hat V_{S}$ alone. The side condition $x\notin S$ is not fussiness:
+the denominator vanishes there, which is why the new domain must be chosen disjoint from $S$ and why
+$\mathrm{Fill}$ exists to supply values at the holes. And the degree drops by $|S|$, so the round
+closes with degree correction --- a geometric sum evaluated in $O(\log e)$ operations by repeated
+squaring rather than term by term.
 
 \section{A WHIR iteration: constraints instead of quotients}
 
@@ -295,13 +335,13 @@ sum evaluated in $O(\log e)$ operations by repeated squaring.
     + Z\cdot\sum_{i=0}^{t}\gamma^{\,i+1}\cdot\eqp(\boldsymbol z_{i},\boldsymbol X),\\
   \sigma' &:= \hat h_{k}(\alpha_{k}) + \sum_{i=0}^{t}\gamma^{\,i+1}\cdot y_{i}.
 \end{align*}
-The out-of-domain answer and the $t$ shift answers become $t+2$ additional \emph{constraints},
+The out-of-domain answer and the $t$ shift answers become $t+1$ additional \emph{constraints},
 folded into the weight polynomial by powers of $\gamma$. No quotient, hence no degree correction,
 hence --- as the paper states explicitly --- \textbf{the verifier performs no divisions at all}. On
 a machine without \texttt{OP\_DIV}, where an inversion must be hinted and checked, that is the
 reason this project should target WHIR rather than STIR.
 
-\section{What a shift query actually is}
+\section{What a shift query actually is}\label{sec:shift}
 
 The most frequently occurring and most easily skimmed quantity in the protocol is
 $r^{\mathrm{shift}}_{i}$ (WHIR writes $z_{i}$). It deserves its own section, because in this
@@ -328,7 +368,7 @@ and it is exactly the row that has to be bound to its leaf.
 
 \subsection*{Why it has to exist}
 
-This is the pivot of the whole STIR/WHIR construction, and the rate reduction of Section 4 is what
+This is the pivot of the whole STIR/WHIR construction, and the rate reduction of \S4 is what
 it pays for. In FRI the folded function lives \emph{naturally} on $\mathcal{L}^{(k)}$ and the
 verifier can compute it unaided. To lower the rate, STIR and WHIR have the prover re-commit a $g$ on
 a \emph{larger} new domain.
@@ -342,7 +382,7 @@ check that this codeword is the fold. Neither suffices alone.
 
 \subsection*{It is the soundness term}
 
-$t$ is not arbitrary; it is precisely the exponent in the query term of Section 8. The argument is
+$t$ is not arbitrary; it is precisely the exponent in the query term of \S\ref{sec:eps}. The argument is
 two lines: if the codeword $u$ near $g$ disagrees with $\Fold(f,\boldsymbol\alpha)$ on at least a
 $\delta$ fraction, each uniform $r^{\mathrm{shift}}_{i}$ independently lands on a disagreement with
 probability $\ge\delta$, so
@@ -351,7 +391,7 @@ probability $\ge\delta$, so
   \;=\;\text{the leading term of }\varepsilon^{\mathrm{shift}}.
 \]
 So $t_{i}=\lceil\lambda/-\log_{2}(1-\delta_{i})\rceil$, and rate reduction saves money precisely
-because it raises the usable $\delta$ and so lowers $t$. Section 4's table and this are two sides of
+because it raises the usable $\delta$ and so lowers $t$. \S4's table and this are two sides of
 one fact.
 
 \subsection*{What it is in this implementation}
@@ -376,9 +416,9 @@ the direction bits of the Merkle walk, so the spender picks neither which leaf i
 it sits; the binding is structural rather than an added check. It also explains where the
 $\mathrm{depth}$ factor in the cost law comes from:
 $\mathrm{depth}=\log_{2}|\mathcal{L}^{(2^{k})}|$, so one shift query is $\mathrm{depth}$ Poseidon2
-permutations, and that is the origin of the 1300 in Section 9.
+permutations, and that is the origin of the 1300 in \S\ref{sec:cost}.
 
-\section{Soundness, and what it rests on}
+\section{Soundness, and what it rests on}\label{sec:eps}
 
 Compilation through BCS requires \emph{round-by-round} soundness. WHIR's Theorem 5.2 gives:
 \begin{align*}
@@ -429,7 +469,7 @@ WHIR Table 5, $m=24$, $\rho=1/2$, $\lambda=128$, Goldilocks cubic extension.
 \vspace{-0.5em}
 \noindent{\color{rule}\rule{\linewidth}{0.6pt}}
 
-\section{What the crate is, and its cost law}
+\section{What the crate is, and its cost law}\label{sec:cost}
 
 Two crates: \texttt{poseidon2} (the permutation, the quartic extension, Merkle verification over
 KoalaBear) and \texttt{whir} (sponge, challenger, sumcheck, multilinear evaluation, constraint,
@@ -542,10 +582,12 @@ order.
 
 \medskip
 \noindent\fbox{\begin{minipage}{0.96\linewidth}\small
-A depth was wrong on the first attempt: \texttt{CLAIM\_UNDER\_STATE\_AND\_R} was written
-$4D+W-1=31$ where the correct value is $2D+W-1=23$. It surfaced as \texttt{InvalidStackOperation}
---- a class of error that appears only when the script is \emph{executed}, which is itself a
-footnote to D3.
+These depths are the failure mode of the whole approach.
+\texttt{CLAIM\_UNDER\_STATE\_AND\_R} is $2D+W-1=23$ and not $4D+W-1=31$; the difference between
+those two is one misread of what sits above the claim, and it produces
+\texttt{InvalidStackOperation} rather than a wrong answer. That is a class of error which appears
+only when the script is \emph{executed}, which is a footnote to D3: a builder that is measured and
+never run cannot be wrong in this way, because it is never right in it either.
 \end{minipage}}
 
 \section{What the repair cost}
@@ -571,7 +613,7 @@ leaving Fiat--Shamir out.} The composed end-to-end script measures \textbf{8\,96
 real Plonky3 WHIR proof accepted by one Bitcoin Script execution, with every perturbation of the
 prover's evaluations rejected.
 
-\section{Constraining the query}
+\section{Constraining the query}\label{sec:constrain}
 
 Three changes, in the order they had to happen.
 
@@ -596,7 +638,7 @@ Each accumulated term collapses, because summing an evaluation against $\eqp$ \e
   \sum_{\boldsymbol b} \hat f_{M}(\boldsymbol b)\,\gamma^{e}\,\eqp(\boldsymbol z,\boldsymbol b)
   = \gamma^{e}\,\hat f_{M}(\boldsymbol z).
 \]
-So $\hat w'$ is exactly the list of $(c_{j},\boldsymbol z_{j})$ pairs of \S2, and checking it means
+So $\hat w'$ is exactly the list of $(c_{j},\boldsymbol z_{j})$ pairs of \S\ref{sec:crs}, and checking it means
 evaluating the final polynomial at each point and taking the weighted sum. That is self-consistent,
 it is the paper's reading, and \texttt{closing\_check} implements it.
 
@@ -611,9 +653,12 @@ evaluated at its own point:
 \]
 and \texttt{eval\_constraints\_poly} evaluates every accumulated $\eqp(\boldsymbol z_{j},\cdot)$
 explicitly. Since this implementation is checked against Plonky3, that is the shape the script must
-produce --- so an $\eqp$ primitive \textbf{is} needed after all. An earlier draft of this report
-concluded from the collapse above that none was; the conclusion was right about the paper and wrong
-about the verifier being targeted, and the gap appears only when the two are put side by side.
+produce --- so an $\eqp$ primitive is needed after all.
+
+The two readings are easy to mistake for one, and the mistake runs in a particular direction: the
+collapse above is a true statement about the paper, and reading it as a statement about the verifier
+being targeted removes a primitive that verifier requires. The gap appears only when the two
+formulations are set side by side.
 
 Measured, since this is where \texttt{final\_poly\_vars} bites:
 
@@ -676,6 +721,7 @@ consumes them. The two conventions meet without a roll.
 \texttt{expand\_univariate} & the square-power point & $n-1$ ext.\ mult.\\
 \texttt{constraint\_eval} & $w(\boldsymbol R)$ & per constraint, above\\
 \texttt{sumcheck\_rounds\_fs\_keep} & buries each round's $\alpha$ & 76 B per round\\
+\texttt{constraint\_eval\_batched} & the same, from scalars and $\chi$ & $+32$--$45\%$\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -685,88 +731,228 @@ Plonky3's own \texttt{Point::eval\_eq} and \texttt{Point::expand\_from\_univaria
 a local reference --- either could otherwise have been a consistent misreading.
 \end{center}
 
+\subsection*{Deriving the constraints, and a convention worth pinning}
+
+The list can be \emph{derived} rather than supplied, and far more cheaply than carrying it whole: a
+round's constraints are all weighted by powers of one batching challenge, and each of their points is
+the square-power expansion of a single scalar, so a round is $1+n$ extension elements rather than
+$n(1+\text{arity})$.
+
+The weights needed pinning down. Plonky3's \texttt{Constraint::challenge\_powers(shift)} is
+\texttt{shifted\_powers}$(\chi^{\text{shift}})$, so within a constraint the weights run
+$\chi^{0},\chi^{1},\chi^{2},\dots$ --- starting at \textbf{one}. The $\sigma'$ update in the same
+protocol uses $\gamma^{\,i+1}$, starting at the challenge itself. \textbf{Two conventions inside one
+protocol} is exactly the sort of thing a script and a reference written by the same hand get wrong
+together, so the two-constraint case is pinned against the expression written out by hand rather than
+against either implementation. Starting at one also makes a group a plain polynomial in $\chi$, so
+Horner evaluates it in $n-1$ multiplications rather than the $2n$ a power ladder costs.
+
 \subsection*{An absorb four times too narrow}
 
 Wiring the threading in exposed a defect the earlier accounting had hidden. Out-of-domain answers
 and the final polynomial are \emph{extension} elements, and Plonky3 observes them with
 \texttt{observe\_algebra\_slice} --- four base elements each, not one. The out-of-domain points are
 also sampled one at a time \emph{between} the answers rather than once after them, so a round costs
-one duplexing per sample and not one per rate block. Transcript permutations for the example
-configuration move from 44 to \textbf{54} and the share from 3.3\% to \textbf{4.0\%}. It is a
-correction in the expensive direction, and the second time this accounting has moved after the
-schedule was \emph{executed} rather than priced.
+one duplexing per sample and not one per rate block. Both are the kind of error that an accounting
+cannot catch and an execution can: nothing about the schedule looks wrong until something absorbs a
+value and the challenge that follows it comes out different.
 
-\section{Does it fit in a Bitcoin transaction?}
+\section{Composing the query openings}\label{sec:compose}
 
-Every figure so far is a script length. This is what those lengths mean, priced against a
-\texttt{WhirConfig} derived by Plonky3's own security analysis rather than a schedule written out by
-hand, so the query counts and domain sizes are whatever the analysis actually produces.
+The queries were priced and never emitted, and emitting them found two defects and one omission.
 
-Neither of the two limits that bind is the one usually named: Taproot removed the 10\,000-byte
-script cap and the 201-opcode cap, so what is left is \emph{weight} --- 400\,000 units for a
-standard transaction, 4\,000\,000 for a block, witness bytes counting one unit each.
+\defect{D4}{\texttt{open\_query} could not have run}
+It took the opening from the main stack and sampled the index with a pick that reaches into the top
+sixteen slots --- so with an opening above the sponge, those picks landed inside the row. The
+contract could not hold, and nothing caught it because the builder \textbf{had no test at all}. It is
+the same shape as D3: a script that is measured and never executed.
+
+\textbf{Fix.} The opening comes off the altstack and the index is sampled with a pick that reaches
+past it. The order is forced rather than chosen: the direction bits go on the altstack, so the
+opening has to come off first or the bits would be popped in its place.
+\defectend
+
+\defect{D5}{The opening's root came from the witness}
+A spender could commit to one tree and open a path in another. Any root with a consistent path
+passed, and the round's \emph{absorbed} commitment --- the one the transcript is bound to --- was
+never compared against.
+
+\textbf{Fix.} The root is copied from that commitment, which the absorb now keeps. This is the third
+value in the crate found to be absorbed and then not retained, after the final polynomial and the
+sumcheck randomness; the pattern is worth naming, because in each case the transcript proved the
+prover had \emph{said} something and nothing tied what was said to what was later used.
+\defectend
+
+Keeping it needed care about \emph{where}. A sumcheck round buries its challenge directly under the
+claim, so a commitment parked there would land inside $\boldsymbol R$ and stop the suffix rule of
+\S\ref{sec:constrain} working. Commitments go below $\boldsymbol R$, where they survive the round's sumcheck rounds
+--- which they must, because Plonky3 opens round $i$'s queries against round $i-1$'s commitment, not
+the one round $i$ just absorbed. Two are alive during a round, the older deeper by exactly one digest.
+
+\subsection*{The omission: the leaf hash was never priced}
+
+The row-to-leaf binding of \S\ref{sec:constrain} closed a real gap, but the accounting only ever counted the path. At
+folding factor 4 a row is sixteen extension elements, so sixty-four base elements, so \textbf{eight
+permutations per query} on top of the twenty-one the path costs.
+
+\begin{center}\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Example configuration} & \textbf{before} & \textbf{now}\\
+\midrule
+Merkle paths & 1300 & 1300\\
+leaf hashing & \emph{unpriced} & \textbf{800}\\
+transcript & 54 & 62\\
+\midrule
+total & 1354 & \textbf{2162}\\
+query share & --- & \textbf{97.1\%}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{Deriving the constraints, and what it costs}
+
+The closing check was sound for the statement and merely \emph{described} everything else: its
+constraint list came from the witness, so the out-of-domain and shift answers were authenticated and
+then ignored. They are now derived, and what makes that affordable is that a constraint is far
+smaller than it looks. A round's constraints share one batching challenge and each of their points is
+the square-power expansion of a single scalar, so a round carries $1+n$ extension elements rather
+than $n(1+\text{arity})$. The rounds bury those scalars below the randomness as they sample them and
+the closing check lifts them back out.
+
+Three things had to line up. \textbf{The order}: Horner wants a group's last term first, and a round
+produces its scalars in order and its challenge afterwards --- so the $\eqp$ values are built on the
+stack as the scalars arrive and Horner runs once the challenge appears. \textbf{The shift scalars}:
+a shift query's point is $g^{\,\text{index}}$, and the index is re-sampled rather than kept, because
+sampling is a pick and the sponge has not moved, while keeping it would mean carrying it past a
+Merkle walk that uses the altstack. \textbf{The arities}: a constraint born at round $i$ is bound by
+the randomness from round $i$ onwards, so it reads the last $m-r_{\text{len}}$ coordinates ---
+\S\ref{sec:constrain}'s suffix rule, now with the arities computed rather than passed in.
+
+\begin{center}\small
+\begin{tabular}{@{}lrr@{}}
+\toprule
+\textbf{Closing check} & \textbf{supplied} & \textbf{derived}\\
+\midrule
+bytes & 1{,}550{,}899 & 92{,}801{,}911\\
+share of the verifier & 0.126\% & \textbf{7.5\%}\\
+constraints evaluated & 1 & \textbf{110}\\
+permutations & 0 & \textbf{0}\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Sixty times larger, and still not a permutation. Everything this report has said about the algebra
+being cheap survives the composition; what grew, every time, is the hashing.
 
 \medskip
 \noindent\fbox{\begin{minipage}{0.96\linewidth}\small
-A single Poseidon2 permutation is 572\,228 bytes, so a standard transaction holds \textbf{0.70} of
-one and an entire block holds \textbf{6.99}. \textbf{The unit that does not fit is not the query ---
-it is one hash.}
+\textbf{What is still supplied, and why it always will be.} The statement's own constraint. Its
+point is public because it \emph{is} the claim being proved, and a different point is a different
+statement rather than a cheaper proof of the same one. Two fidelity items remain against Plonky3:
+each group ends with a fresh squeeze for its batching challenge rather than reading whichever rate
+slot the query indices happened to leave, and Plonky3 folds the statement and the commit phase's
+out-of-domain samples into one \texttt{initial\_constraint} where this treats them as two groups.
 \end{minipage}}
-\medskip
+
+\section{The stack the verifier keeps}\label{sec:stack}
+
+Everything above is about what the verifier computes. This is about where it puts things, which on a
+stack machine is most of the work and all of the risk: every defect in \S\ref{sec:compose} was a
+value in the wrong place rather than an arithmetic mistake.
+
+\subsection*{The invariant}
+
+Between steps the main stack reads, bottom to top:
+\[
+  \underbrace{\text{carried scalars}}_{\text{constraints}}
+  \;\|\;
+  \underbrace{\hat f_{M}}_{2^{v}\text{ elements}}
+  \;\|\;
+  \underbrace{\boldsymbol R}_{m\text{ elements}}
+  \;\|\;
+  \underbrace{\text{claim}}_{1}
+  \;\|\;
+  \underbrace{\text{sponge}}_{16\text{ slots}} .
+\]
+Three constraints fix that order, and between them there is no freedom left.
+
+\smallskip
+\noindent\textbf{The sponge is on top} because absorbing wants its inputs directly above the state
+and sampling is a pick into the top sixteen slots. Everything else has to be underneath, which is why
+a query opening --- the one thing that must sit above the state while it is checked --- needed a
+sampling primitive that reaches past it.
+
+\smallskip
+\noindent\textbf{$\boldsymbol R$ must be contiguous}, because \S\ref{sec:constrain}'s rule reads a
+constraint's local point as a \emph{suffix} of it. A sumcheck round appends its challenge directly
+under the claim, so anything else parked there would land in the middle of the randomness and the
+suffix rule would silently read the wrong coordinates. That single requirement is what forces
+commitments and the final polynomial below $\boldsymbol R$ rather than under the claim, and it is not
+a preference: nothing would fail loudly if it were violated.
+
+\smallskip
+\noindent\textbf{The altstack is the transcript.} Everything the spender supplies is on it in
+consumption order, so nothing may be parked there across a step. A value needing to survive one has
+to be buried on the main stack instead --- which is the whole reason the layout above exists.
+
+\subsection*{Why every depth is a constant}
+
+Burying a value under a region, and copying one back out from under it, are both loops at a
+\emph{fixed} depth. The argument is the same in both directions and worth stating once, because it is
+used a dozen times and looks like an off-by-one every time:
+
+\begin{quote}
+Rolling the deepest slot of a region to the top removes one item from below the cursor and adds one
+above it. The two cancel, so the next-deepest slot is at the same depth as the last one was.
+\end{quote}
+
+So ``lift a region of $k$ slots over a block of $b$'' is $k$ rolls at depth $b+k-1$, and it preserves
+the region's internal order. The same cancellation is why \texttt{ext4::copy} is four picks at one
+depth, and why copying a block back out is $b$ picks at the depth the region left it.
+
+The one place this does \emph{not} hold is dropping from the bottom: each slot removed shrinks the
+stack, so the depth decreases by one per step. Both forms appear, and confusing them is exactly the
+class of error that only shows up when the script is executed.
+
+\subsection*{What a round does to the layout}
 
 \begin{center}\small
-\begin{tabular}{@{}rrrrrrr@{}}
+\begin{tabular}{@{}lll@{}}
 \toprule
-$\lambda$ & \texttt{pow} & $m$ & rounds & queries & depth & \textbf{one query} \\
+\textbf{Step} & \textbf{Effect on the layout} & \textbf{Depth} \\
 \midrule
-80  & 0  & 16 & 2 & 21 & 16 & 13.7\,MB $=$ \textbf{3.43 blocks}\\
-80  & 22 & 16 & 2 & 15 & 16 & 13.7\,MB $=$ \textbf{3.43 blocks}\\
-100 & 22 & 16 & 2 & 20 & 16 & 13.7\,MB $=$ \textbf{3.43 blocks}\\
-80  & 22 & 20 & 3 & 15 & 20 & 16.0\,MB $=$ 4.01 blocks\\
-80  & 22 & 24 & 4 & 15 & 24 & 18.3\,MB $=$ 4.58 blocks\\
+absorb the commitment & one segment below $\boldsymbol R$ & $4r+20+8-1$\\
+out-of-domain sample & one element below $\boldsymbol R$ & $4r+20+4-1$\\
+query opening & nothing; balanced & reaches the commitment\\
+shift scalar & one element below $\boldsymbol R$ & $4r+20+4-1$\\
+batching challenge & one element below $\boldsymbol R$ & $4r+20+4-1$\\
+drop the opened commitment & a segment leaves the middle & recomputed\\
+sumcheck rounds & $\boldsymbol R$ grows under the claim & $2\cdot4+16-1$\\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The first three rows are the answer to a question worth separating out. \textbf{Lowering the
-security level buys fewer queries, not cheaper ones.} At $m=16$ the cost of one query is identical
-at 80 and 100 bits, because depth is set by the domain size and not by $\lambda$; what moves is the
-count, 20 down to 15. So no security level puts a query in a transaction --- a query is three to
-five \emph{blocks} throughout.
+Only the second-to-last row is awkward. Dropping a commitment removes a segment from the
+\emph{middle} of the carried region, so every depth above it shifts --- which is why the generator
+keeps a model of the region rather than hard-coding the numbers. Two commitments are live at once,
+because a round's queries open the \emph{previous} round's codeword while the current one has already
+been absorbed.
 
-For the whole verifier the level does buy something, roughly proportionally:
+\subsection*{And what the closing check does with it}
 
-\begin{center}\small
-\begin{tabular}{@{}rrrrrr@{}}
-\toprule
-$\lambda$ & \texttt{pow} & $m$ & permutations & bytes & blocks\\
-\midrule
-100 & 22 & 16 & 653 & 373{,}664{,}884 & 93.4\\
-80  & 22 & 16 & 497 & 284{,}397{,}316 & \textbf{71.1}\\
-80  & 22 & 20 & 708 & 405{,}137{,}424 & 101.3\\
-80  & 22 & 24 & 934 & 534{,}460{,}952 & 133.6\\
-\bottomrule
-\end{tabular}
-\end{center}
+In order: drop the sponge; lift $\hat f_{M}$ over $\boldsymbol R$ and the claim and collapse it to one
+value; evaluate the statement's constraint, which \emph{reads} $\boldsymbol R$ without consuming it;
+lift the carried scalars out and hand them to the altstack; evaluate the accumulated constraints,
+which consumes $\boldsymbol R$; and compare.
 
-76\% of the cost for 80\% of the security, which is close to linear because query count is close to
-linear in $\lambda$ and query count is very nearly the whole bill.
+The order is not free. The statement has to be evaluated before the scalars reach the altstack,
+because its pairs are down there underneath them; and it has to be evaluated before the accumulated
+constraints, because those consume the randomness it needs. Moving the scalars reverses their order
+twice --- once rolling them up, once moving them across --- which is what lets a round bury them in
+the order it samples them and still have Horner read them in the order it wants.
 
-\medskip
-The same table settles \S16's proof-of-work point more sharply than the small configuration could.
-At $\texttt{pow\_bits}=0$ neither level is derivable at all beyond a toy instance: 100-bit at $m=16$
-already requires 19 bits of grinding, $m=20$ requires 28, and $m=24$ requires 37. Even 80-bit needs
-8 bits at $m=20$. \texttt{pow\_bits: 0} is therefore not a conservative choice --- it is a
-configuration that mostly does not exist.
-
-\medskip
-\noindent\textbf{What this means for the next step.} Chunking is not optional and its unit has to be
-\emph{sub-query}. The natural seam is one Merkle level --- 572\,252 bytes, 0.14 of a block --- with
-the intermediate digest committed between chunks, which is the shape BitVM2's disprove pattern
-already has. Nothing in \S15 changes this: threading is arithmetic, and arithmetic is free at this
-resolution.
-
-\section{Two unused levers}
+\section{Two unused levers}\label{sec:levers}
 
 \subsection*{Proof of work}
 \texttt{pow\_bits: 0} is why the security level tops out at 100. Both reference implementations
@@ -780,10 +966,39 @@ permutation regardless of depth:
 \]
 
 \subsection*{Soundness regime}
-\texttt{SecurityAssumption::CapacityBound} is the cheapest of the three by a factor of 3.7 in
-verifier hashes --- here, directly, in script bytes --- and the only one resting on the unproven half
-of Conjecture 4.12. A defensible choice, and the papers' own benchmarking default, but a verifier
-that settles bitcoin should say out loud which assumption it stands on.
+\texttt{SecurityAssumption::CapacityBound} is the cheapest of the three and the only one resting on
+the unproven half of Conjecture 4.12. Nothing in the implementation mentions a soundness assumption:
+the script executes a schedule, and the regime reaches it only as a query count. So the choice is a
+configuration change, and \texttt{whir/tests/budget.rs} prices it --- each regime given the grinding
+it needs, since holding \texttt{pow\_bits} fixed reports \emph{not derivable} for the weaker
+assumptions rather than a price.
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Regime} & $m$ & \texttt{pow} & \textbf{queries} & \textbf{permutations} & \textbf{vs CB}\\
+\midrule
+UD, proved            & 16 & 0  & 110 & 7\,376  & \textbf{7.18$\times$}\\
+JB, Conj.\ 4.12(1)    & 16 & 26 & 39  & 1\,853  & 1.80$\times$\\
+CB, Conj.\ 4.12(2)    & 16 & 19 & 21  & 1\,027  & 1.00$\times$\\
+\midrule
+UD, proved            & 20 & 0  & 110 & 11\,171 & \textbf{9.01$\times$}\\
+JB, Conj.\ 4.12(1)    & 20 & 33 & 35  & 2\,222  & 1.79$\times$\\
+CB, Conj.\ 4.12(2)    & 20 & 28 & 19  & 1\,240  & 1.00$\times$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two things the paper's own comparison does not show at this instance. \textbf{UD wants no grinding at
+all}, paying entirely in queries, and its count is capped at 110 regardless of size --- so the gap
+widens with $m$ rather than staying fixed. And \textbf{JB wants more grinding than CB}, 26 bits
+against 19, which is the direction a weaker assumption should push: less can be assumed, so more has
+to be bought.
+
+A defensible choice, and the papers' own benchmarking default. But the proved alternative costs 7 to
+9 times here, not the 3.7 of WHIR's Table 5 --- that table is Goldilocks with a cubic extension at
+$m=24$ and rate $1/2$, and a ratio does not travel between instances. A verifier that settles bitcoin
+should say out loud which assumption it stands on, and what the proved one would cost \emph{here}.
 
 \clearpage
 \begin{center}{\large\bfseries Part III\quad Completeness and soundness}\end{center}
@@ -840,7 +1055,7 @@ $\le\varepsilon_{i}$, and whose being 0 on a full transcript implies rejection. 
 necessary because Fiat--Shamir lets a prover retry challenges, under which plain soundness does not
 survive.
 
-The four errors of Section 8 split in two, and the split is useful to an implementer:
+The four errors of \S\ref{sec:eps} split in two, and the split is useful to an implementer:
 
 \medskip
 \noindent\fbox{\begin{minipage}{0.96\linewidth}\small
@@ -879,14 +1094,15 @@ Closing identity & all four EF coefficients; weight taken from the stack & $\le 
 \text{point})$ pairs between rounds. Both ends exist --- $\sigma'$ is computed and the closing
 identity is checked --- but the pairs are not yet carried from round to round, so what the script
 guarantees is that each step holds individually, not WHIR's full round-by-round soundness. The gap
-between Section 8's $\varepsilon$ and this table is exactly that.
+between \S\ref{sec:eps}'s $\varepsilon$ and this table is exactly that.
 
 \medskip
 \noindent\fbox{\begin{minipage}{0.96\linewidth}\small
 \textbf{An assumption that must be named.} The query-term errors above are under the capacity bound
 (\texttt{SecurityAssumption::CapacityBound}), which rests on the \emph{unproven} half of
-Conjecture 4.12. Under the proved unique-decoding setting the query count is 3.7$\times$ larger by
-Section 8's table, and script bytes scale with it.
+Conjecture 4.12. Under the proved unique-decoding setting this implementation costs 7 to 9 times as
+much --- measured at \S\ref{sec:levers}, not read off the paper's table, which is a different
+instance --- and script bytes scale with the query count.
 \end{minipage}}
 
 \subsection*{Why D1 was ``soundness error $=1$''}
@@ -910,11 +1126,11 @@ had to bind $r$ to the transcript rather than choose a better constant.
 \noindent\footnotesize\color{muted}
 Sources: G.~Arnon, A.~Chiesa, G.~Fenzi, E.~Yogev, \emph{STIR: Reed--Solomon Proximity Testing with
 Fewer Queries}, ePrint 2024/390 (CRYPTO~'24); and \emph{WHIR: Reed--Solomon Proximity Testing with
-Super-Fast Verification}, ePrint 2024/1586. Implementation figures are from
-\texttt{poseidon2/tests/verifier\_cost.rs}, \texttt{whir/tests/end\_to\_end.rs},
-\texttt{whir/tests/verifier.rs} and \texttt{whir/tests/constraint.rs}. The 44 transcript
-permutations, 3.3\% share, 8\,967\,342-byte composed script, per-point closing-check sizes and 67
-passing tests are all measured on this machine; the 135\,MB and \texttt{eval\_multilinear}
-extrapolations follow the repository README.
+Super-Fast Verification}, ePrint 2024/1586. Implementation figures are from the test suite:
+\texttt{verifier\_cost}, \texttt{end\_to\_end}, \texttt{verifier},
+\texttt{constraint} and \texttt{budget}. The 2162 permutations, 2.9\% transcript share, 8\,967\,342-byte
+composed sumcheck chain, per-constraint closing-check sizes and 98 passing tests are all measured on
+this machine. What a verifier would cost on-chain, and the
+chunking a disprove needs, are the repository README's subject rather than this document's.
 
 \end{document}

@@ -41,6 +41,10 @@ pub struct Round {
     /// Field elements in one opened row — the `2^folding_factor` values of the
     /// fibre a shift query reads, which is what a Merkle leaf commits to.
     pub row_len: usize,
+    /// Generator of the folded evaluation domain. A shift query's constraint
+    /// point is the square-power expansion of `domain_gen^index`, so the
+    /// verifier needs the generator to turn a sampled index into a point.
+    pub domain_gen: u32,
 }
 
 /// A WHIR instance, mirroring the fields of `WhirConfig` this verifier reads.
@@ -257,6 +261,42 @@ fn open_round_queries(r: &Round, commit_depth: usize) -> Script {
     script! { for q in queries { { q } } }
 }
 
+/// Sink the top `n` slots to just below the folding randomness.
+///
+/// The same manoeuvre [`absorb_n_from_altstack_keep`] performs, for a value that
+/// is already on the stack rather than arriving from the altstack: lift the
+/// randomness, the claim and the sponge over it, deepest slot first, at a depth
+/// that stays constant because each roll removes one item from below and adds
+/// one above.
+///
+/// Anything buried earlier stays beneath, so the carried region grows in the
+/// order the transcript produces it — which is the order the closing check
+/// wants to read it back in.
+fn sink_below_randomness(n: usize, r_len: usize) -> Script {
+    let region = ext4::D * r_len + ext4::D + sponge::WIDTH;
+    let depth = n + region - 1;
+    script! { for _ in 0..region { { depth } OP_ROLL } }
+}
+
+/// A shift query's constraint scalar: `domain_gen^index`, as an `EF` element.
+///
+/// The index is re-sampled rather than kept from [`open_query`], which is free:
+/// [`challenger::sample`] is a pick, so reading the same rate slot again gives
+/// the same value, and the sponge has not moved in between. Keeping it instead
+/// would mean carrying it past a Merkle walk that uses the altstack.
+///
+/// `pow_const_base` squares the generator at build time, so the exponentiation
+/// costs one multiply-by-constant per bit of the index and no permutation.
+fn shift_scalar(slot: usize, log_domain_size: usize, domain_gen: u32) -> Script {
+    script! {
+        { challenger::sample(slot) }
+        { field::pow_const_base(domain_gen, log_domain_size) }
+        // Embed in the extension: coefficient zero is the base element, and the
+        // rest are zero, with `a0` deepest as everywhere else.
+        0 0 0
+    }
+}
+
 /// Depth of a commitment's deepest slot, given what is stacked above it.
 ///
 /// A commitment is buried *below* the folding randomness rather than under the
@@ -347,65 +387,149 @@ pub fn final_check() -> Script {
 /// the two numbers are deliberately different and the doc comment on each says
 /// which it is.
 pub fn verify(cfg: &Config) -> Script {
-    // Each round's block is built here: the commitment depths depend on how much
-    // randomness has accumulated, which `script!` cannot compute.
-    let mut r_len = cfg.initial_folding_factor;
-    let mut rounds: Vec<Script> = Vec::new();
+    let m = cfg.total_folding_vars();
+    // The carried region below the randomness, bottom to top, in slots. New
+    // burials go on top of it, so it ends up in transcript order -- which is the
+    // order `constraint_eval_batched` reads its groups back in.
+    let mut below: Vec<usize> = Vec::new();
+    let mut r_len = 0usize;
+    let mut out: Vec<Script> = Vec::new();
+
+    // Depth of the deepest slot of segment `i`, from the top of the stack.
+    let depth_of = |below: &[usize], i: usize, r_len: usize| -> usize {
+        let above: usize = below[i + 1..].iter().sum();
+        sponge::WIDTH + ext4::D + ext4::D * r_len + above + below[i] - 1
+    };
+
+    // --- commit phase: the initial codeword, and its out-of-domain samples ---
+    out.push(script! { { absorb_n_from_altstack_keep(merkle::DIGEST, r_len) } });
+    below.push(merkle::DIGEST);
+    let commit_init = below.len() - 1;
+    for _ in 0..cfg.initial_ood_samples {
+        out.push(script! {
+            { challenger::sample_ef(0) }
+            { sink_below_randomness(ext4::D, r_len) }
+            { absorb_n_from_altstack(ext4::D) }
+        });
+        below.push(ext4::D);
+    }
+    // The group's batching challenge. A fresh squeeze rather than a leftover
+    // rate slot: which slots the queries have spent is known here, but relying
+    // on that would couple the challenge's position to the query count for the
+    // sake of one permutation in the whole schedule.
+    out.push(script! {
+        { sponge::squeeze() }
+        { challenger::sample_ef(0) }
+        { sink_below_randomness(ext4::D, r_len) }
+    });
+    below.push(ext4::D);
+    out.push(script! { { sumcheck::sumcheck_rounds_fs_keep(cfg.initial_folding_factor) } });
+    r_len += cfg.initial_folding_factor;
+
+    // --- rounds ----------------------------------------------------------
+    let mut opened = commit_init;
     for r in cfg.rounds.iter() {
-        // While a round runs, two commitments are alive: the one it opens and
-        // the one it absorbs. The older is deeper by exactly one digest.
-        let opened = commitment_depth(r_len, merkle::DIGEST);
-        let block = script! {
-            // The round commitment enters the transcript, so every challenge
-            // drawn after this point depends on it. It is kept, because it is
-            // what the *next* round's queries open.
-            { absorb_n_from_altstack_keep(merkle::DIGEST, r_len) }
-            // Then, per out-of-domain sample, Plonky3 *alternates*: it samples
-            // the point from the current rate and absorbs the answer, rather
-            // than absorbing a block and sampling once. Collapsing that into one
-            // absorb gets both the permutation count and the challenges wrong,
-            // because a point sampled after the answers depends on them.
-            for _ in 0..r.ood_samples {
+        // A constraint born here is over the new commitment's variables, and the
+        // randomness that binds them is everything from this round onwards --
+        // the last `m - r_len` coordinates of `R`.
+        let arity = m - r_len;
+        out.push(script! { { absorb_n_from_altstack_keep(merkle::DIGEST, r_len) } });
+        below.push(merkle::DIGEST);
+        let this_commit = below.len() - 1;
+
+        for _ in 0..r.ood_samples {
+            out.push(script! {
                 { challenger::sample_ef(0) }
-                { ext4::drop_n(1) }
+                { sink_below_randomness(ext4::D, r_len) }
                 { absorb_n_from_altstack(ext4::D) }
-            }
-            // The queries, against the *previous* commitment. This is where
-            // nearly all of the script weight is: one permutation per Merkle
-            // level, per query, plus the leaf hash.
-            { open_round_queries(r, opened) }
-            { drop_commitment(opened) }
-            { sumcheck::sumcheck_rounds_fs_keep(r.folding_factor) }
-        };
-        rounds.push(block);
+            });
+            below.push(ext4::D);
+        }
+        for q in 0..r.num_queries {
+            let slot = q % queries_per_squeeze();
+            let d = depth_of(&below, opened, r_len);
+            out.push(script! {
+                if q > 0 && slot == 0 { { sponge::squeeze() } }
+                { open_query(slot, r.log_domain_size, r.row_len, d) }
+                { shift_scalar(slot, r.log_domain_size, r.domain_gen) }
+                { sink_below_randomness(ext4::D, r_len) }
+            });
+            below.push(ext4::D);
+        }
+        out.push(script! {
+            { sponge::squeeze() }
+            { challenger::sample_ef(0) }
+            { sink_below_randomness(ext4::D, r_len) }
+        });
+        below.push(ext4::D);
+        let _ = arity; // recorded by `constraint_groups`, which close() reads
+
+        // The opened commitment has done its work. Dropping it from the middle
+        // of the carried region shifts everything above it up, which is why the
+        // model is kept rather than the depths hard-coded.
+        let d = depth_of(&below, opened, r_len);
+        out.push(script! { { drop_commitment(d) } });
+        below.remove(opened);
+        let this_commit = if this_commit > opened { this_commit - 1 } else { this_commit };
+        opened = this_commit;
+
+        out.push(script! { { sumcheck::sumcheck_rounds_fs_keep(r.folding_factor) } });
         r_len += r.folding_factor;
     }
-    // At the final queries the last commitment has the final polynomial stacked
-    // above it as well as the randomness.
-    let final_opened = commitment_depth(r_len, ext4::D << cfg.final_poly_vars);
-    script! {
-        // The commit phase: the initial codeword's root, and its out-of-domain
-        // samples. Round 0's queries open this one.
-        { absorb_n_from_altstack_keep(merkle::DIGEST, 0) }
-        for _ in 0..cfg.initial_ood_samples {
-            { challenger::sample_ef(0) }
-            { ext4::drop_n(1) }
-            { absorb_n_from_altstack(ext4::D) }
-        }
-        { sumcheck::sumcheck_rounds_fs_keep(cfg.initial_folding_factor) }
-        for b in rounds { { b } }
 
-        // The final polynomial arrives in the clear and is absorbed whole. Its
-        // evaluations are extension elements, so each is `ext4::D` base ones --
-        // `observe_algebra_slice`, not `observe_slice`. A copy is kept, because
-        // the closing identity evaluates it.
+    // --- the final polynomial, the final queries, the final sumcheck ------
+    out.push(script! {
         { absorb_n_from_altstack_keep(ext4::D << cfg.final_poly_vars, r_len) }
-        // The final proximity test opens the last round's commitment, which is
-        // still on the stack for exactly this reason.
-        { open_round_queries(&cfg.final_round, final_opened) }
-        { drop_commitment(final_opened) }
-        { sumcheck::sumcheck_rounds_fs_keep(cfg.final_sumcheck_rounds) }
+    });
+    below.push(ext4::D << cfg.final_poly_vars);
+
+    // The final proximity test checks its answers against the final polynomial
+    // directly rather than accumulating a constraint -- Plonky3's
+    // `stir_statement.verify(final_evaluations)` -- so these queries carry
+    // nothing, and the polynomial stays the topmost carried segment.
+    for q in 0..cfg.final_round.num_queries {
+        let slot = q % queries_per_squeeze();
+        let d = depth_of(&below, opened, r_len);
+        out.push(script! {
+            if q > 0 && slot == 0 { { sponge::squeeze() } }
+            { open_query(slot, cfg.final_round.log_domain_size, cfg.final_round.row_len, d) }
+        });
     }
+    let d = depth_of(&below, opened, r_len);
+    out.push(script! { { drop_commitment(d) } });
+    below.remove(opened);
+
+    out.push(script! { { sumcheck::sumcheck_rounds_fs_keep(cfg.final_sumcheck_rounds) } });
+
+    script! { for b in out { { b } } }
+}
+
+/// The constraint groups [`verify`] accumulates: `(constraints, arity)` per
+/// group, in the order the closing check reads them.
+///
+/// One group for the commit phase and one per round, each holding that
+/// commitment's out-of-domain samples, that round's shift queries and the
+/// batching challenge that weights them. A group's arity is the commitment's
+/// variable count, which is `m` minus the randomness accumulated before it —
+/// so it reads exactly the suffix of `R` drawn from that point onwards.
+pub fn constraint_groups(cfg: &Config) -> Vec<(usize, usize)> {
+    let m = cfg.total_folding_vars();
+    let mut groups = vec![(cfg.initial_ood_samples, m)];
+    let mut r_len = cfg.initial_folding_factor;
+    for r in cfg.rounds.iter() {
+        groups.push((r.ood_samples + r.num_queries, m - r_len));
+        r_len += r.folding_factor;
+    }
+    groups
+}
+
+/// Extension elements the schedule carries down to the closing check.
+///
+/// One per constraint, plus one batching challenge per group — the challenge is
+/// carried alongside the scalars but is not itself a constraint, which is an
+/// easy off-by-one and was one.
+pub fn carried_scalars(cfg: &Config) -> usize {
+    constraint_groups(cfg).iter().map(|&(n, _)| n + 1).sum()
 }
 
 /// The closing identity, on the stack [`verify`] leaves.
@@ -456,7 +580,7 @@ pub fn verify(cfg: &Config) -> Script {
 /// this resolution arithmetic is free — which is worth stating plainly, because
 /// it means the reason a WHIR verifier does not fit on Bitcoin is entirely the
 /// Merkle openings and not the algebra.
-pub fn close(cfg: &Config, groups: &[(usize, usize)]) -> Script {
+pub fn close(cfg: &Config, statement: &[(usize, usize)]) -> Script {
     // In Plonky3 these are the same quantity: the final polynomial has one
     // variable per final sumcheck round, and is evaluated at that round's
     // randomness. Splitting them into two fields is this crate's own doing, so
@@ -469,14 +593,20 @@ pub fn close(cfg: &Config, groups: &[(usize, usize)]) -> Script {
     let v = cfg.final_sumcheck_rounds;
     let m = cfg.total_folding_vars();
     let n_evals = 1usize << cfg.final_poly_vars;
-    // The final polynomial, lying beneath the randomness and the claim.
-    let lift = ext4::D * n_evals + ext4::D * m + ext4::D - 1;
+    let groups = constraint_groups(cfg);
+    let carried = carried_scalars(cfg);
+    // The stack below the sponge, bottom to top: the carried scalars, the final
+    // polynomial, the randomness, the claim.
+    let lift_poly = ext4::D * n_evals + ext4::D * m + ext4::D - 1;
+    // Once the polynomial has been lifted out and collapsed to one value, the
+    // scalars sit under the randomness, the claim and that value.
+    let lift_scalars = ext4::D * carried + ext4::D * m + 2 * ext4::D - 1;
     script! {
         // The sponge has nothing left to say.
         for _ in 0..sponge::WIDTH { OP_DROP }
 
         // Bring the final polynomial up over `R` and the claim.
-        for _ in 0..(ext4::D * n_evals) { { lift } OP_ROLL }
+        for _ in 0..(ext4::D * n_evals) { { lift_poly } OP_ROLL }
 
         // The point it is evaluated at is the *final* sumcheck randomness, the
         // tail of `R`. `eval_multilinear` pops the last variable first, and the
@@ -487,9 +617,31 @@ pub fn close(cfg: &Config, groups: &[(usize, usize)]) -> Script {
         for i in (0..v).rev() { { ext4::copy(n_evals + 1 + i) } { ext4::to_altstack() } }
         { crate::multilinear::eval_multilinear(cfg.final_poly_vars) }
 
-        // w(R). The claim and f_M(r_fin) sit above the randomness and are both
-        // still needed, so they are stepped over rather than parked.
-        { constraint::constraint_eval_at(m, groups, 2) }
+        // The statement's own constraint, first, because it reads the
+        // randomness without consuming it and the batched evaluation does not.
+        // Its point is public: it *is* the statement, and a different point is a
+        // different claim, so the spender supplying it is not a choice. Its
+        // pairs are the only thing on the altstack until the scalars join them,
+        // which is why this has to run before they do.
+        for st in statement.iter() {
+            { constraint::weights_at_under(st.0, st.1, 2) }
+        }
+        for _ in 0..statement.len() { { ext4::to_altstack() } }
+
+        // Bring the carried scalars up, then hand them to the altstack. Rolling
+        // deepest-first preserves their order; moving top-first reverses it
+        // again, so what pops is the order they were sampled in.
+        for _ in 0..(ext4::D * carried) { { lift_scalars } OP_ROLL }
+        for _ in 0..carried { { ext4::to_altstack() } }
+
+        // w(R) from everything the transcript produced. The claim and
+        // f_M(r_fin) sit above the randomness and are both still needed, so
+        // they are stepped over rather than parked.
+        { constraint::constraint_eval_batched_at(m, &groups, 2) }
+        for _ in 0..statement.len() {
+            { ext4::from_altstack() }
+            { ext4::add() }
+        }
 
         // final_check wants `claimed weight f_at_r`; lift the value over the
         // weight, deepest slot first.
@@ -500,10 +652,10 @@ pub fn close(cfg: &Config, groups: &[(usize, usize)]) -> Script {
 
 /// [`verify`] followed by [`close`]: the whole transcript and the identity it
 /// exists to reach.
-pub fn verify_and_close(cfg: &Config, groups: &[(usize, usize)]) -> Script {
+pub fn verify_and_close(cfg: &Config, statement: &[(usize, usize)]) -> Script {
     script! {
         { verify(cfg) }
-        { close(cfg, groups) }
+        { close(cfg, statement) }
     }
 }
 
@@ -521,6 +673,10 @@ pub fn verify_and_close(cfg: &Config, groups: &[(usize, usize)]) -> Script {
 ///   still fits one rate block;
 /// - query indices are drawn `RATE` at a time, so a round with more queries than
 ///   that has to re-squeeze;
+/// - each constraint group ends with a squeeze for its batching challenge,
+///   rather than reading a rate slot the query indices happen to have left --
+///   one permutation per round, traded for not coupling the challenge's position
+///   to the query count;
 /// - out-of-domain answers and the final polynomial are **extension** elements.
 ///   Counting them as base elements under-absorbed by a factor of four, and the
 ///   out-of-domain points are sampled one at a time between the answers rather
@@ -536,8 +692,9 @@ pub fn permutation_count(cfg: &Config) -> usize {
     // `PaddingFreeSponge` the commitment was built with.
     let leaf_hash = |row_len: usize| row_len.div_ceil(merkle::HASH_RATE);
 
-    // The commit phase: the initial root, and one duplexing per OOD sample.
-    let mut n = merkle::DIGEST.div_ceil(RATE) + cfg.initial_ood_samples;
+    // The commit phase: the initial root, one duplexing per OOD sample, and the
+    // squeeze that produces the group's batching challenge.
+    let mut n = merkle::DIGEST.div_ceil(RATE) + cfg.initial_ood_samples + 1;
     n += sumcheck_perms(cfg.initial_folding_factor);
     for r in cfg.rounds.iter() {
         n += merkle::DIGEST.div_ceil(RATE); // the commitment
@@ -546,6 +703,7 @@ pub fn permutation_count(cfg: &Config) -> usize {
         n += r.ood_samples;
         n += index_squeezes(r.num_queries);
         n += r.num_queries * (r.log_domain_size + leaf_hash(r.row_len));
+        n += 1; // the round's batching challenge
         n += sumcheck_perms(r.folding_factor);
     }
     n += (ext4::D << cfg.final_poly_vars).div_ceil(RATE);

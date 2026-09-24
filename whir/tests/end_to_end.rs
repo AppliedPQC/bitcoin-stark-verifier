@@ -11,18 +11,21 @@
 //! chose to send.
 
 use bitcoin_script::{define_pushable, script};
-use p3_challenger::DuplexChallenger;
+use p3_challenger::{
+    CanObserve, CanSample, CanSampleBits, CanSampleUniformBits, DuplexChallenger, FieldChallenger,
+    GrindingChallenger, ResamplingError, UniformSamplingField,
+};
 use p3_commit::MultilinearPcs;
 use p3_dft::Radix2DFTSmallBatch;
 use p3_field::extension::BinomialExtensionField;
-use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField32};
+use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 use p3_koala_bear::{default_koalabear_poseidon2_16, KoalaBear, Poseidon2KoalaBear};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_sumcheck::layout::{Layout, PrefixProver};
 use p3_sumcheck::layout::Table;
 use p3_sumcheck::{OpeningProtocol, OpeningRequest, TableShape, TableSpec};
-use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use p3_whir::fiat_shamir::domain_separator::DomainSeparator;
+use p3_symmetric::{MerkleCap, PaddingFreeSponge, TruncatedPermutation};
+use p3_whir::WhirShape;
 use p3_whir::parameters::{FoldingFactor, ProtocolParameters, SecurityAssumption, WhirConfig};
 use p3_whir::pcs::prover::WhirProver;
 use rand010::SeedableRng;
@@ -81,21 +84,48 @@ fn round_log_inv_rates(num_variables: usize, ff: &FoldingFactor) -> Vec<usize> {
     rates
 }
 
-/// Produce a real WHIR proof over KoalaBear with Plonky3's prover.
 thread_local! {
     static SECURITY_LEVEL: core::cell::RefCell<usize> = const { core::cell::RefCell::new(32) };
     static RATE_LOG: core::cell::RefCell<usize> = const { core::cell::RefCell::new(1) };
+    static NUM_VARS: core::cell::RefCell<usize> = const { core::cell::RefCell::new(6) };
 }
 
 type Commit = <MyMmcs as p3_commit::Mmcs<F>>::Commitment;
 
-fn prove() -> (Commit, p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>) {
+type Proof = p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>;
+
+/// The protocol parameters every prover and verifier in this file agrees on.
+///
+/// Built from `num_variables` alone so a second party (a differently typed
+/// verifier, say) can derive the identical `WhirConfig` without being handed
+/// the first party's.
+fn params(num_variables: usize) -> ProtocolParameters {
+    let folding_factor = FoldingFactor::Constant(2);
+    ProtocolParameters {
+        security_level: SECURITY_LEVEL.with(|v| *v.borrow()),
+        pow_bits: 0,
+        round_log_inv_rates: round_log_inv_rates(num_variables, &folding_factor),
+        folding_factor,
+        soundness_type: SecurityAssumption::CapacityBound,
+        starting_log_inv_rate: RATE_LOG.with(|v| *v.borrow()),
+    }
+}
+
+/// Produce a real WHIR proof over KoalaBear with Plonky3's prover.
+fn prove() -> (Commit, Proof) {
+    let (commitment, proof, _, _) = prove_full();
+    (commitment, proof)
+}
+
+/// `prove`, also returning what a second verifier needs to rebuild the
+/// configuration: the padded variable count and the opening protocol.
+fn prove_full() -> (Commit, Proof, usize, OpeningProtocol) {
     let folding_factor = FoldingFactor::Constant(2);
     let folding = folding_factor.at_round(0);
 
     // Build the tables directly: Plonky3's `test_util` helpers are hardwired to
     // BabyBear, and the script under test is KoalaBear.
-    let (width, num_vars) = (2usize, 6usize);
+    let (width, num_vars) = (2usize, NUM_VARS.with(|v| *v.borrow()));
     let specs = vec![TableSpec::new(
         // TableShape::new takes (num_variables, width), in that order.
         TableShape::new(num_vars, width),
@@ -113,27 +143,20 @@ fn prove() -> (Commit, p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>) {
     let perm = default_koalabear_poseidon2_16();
     let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
 
-    let params = ProtocolParameters {
-        security_level: SECURITY_LEVEL.with(|v| *v.borrow()),
-        pow_bits: 0,
-        round_log_inv_rates: round_log_inv_rates(num_variables, &folding_factor),
-        folding_factor,
-        soundness_type: SecurityAssumption::CapacityBound,
-        starting_log_inv_rate: RATE_LOG.with(|v| *v.borrow()),
-    };
-    let config = WhirConfig::new(num_variables, params).expect("config");
+    let config = WhirConfig::new(num_variables, params(num_variables)).expect("config");
     let pcs = Pcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
 
     // Prove.
+    // The transcript seeds itself from the protocol's domain separator; the
+    // challenger starts fresh.
     let mut ch = challenger();
-    let mut ds = DomainSeparator::new(vec![]);
-    pcs.add_domain_separator::<8>(&mut ds);
-    ds.observe_domain_separator(&mut ch);
     let (commitment, prover_data) =
-        <Pcs<PrefixProver<F, EF>> as MultilinearPcs<EF, MyChallenger>>::commit(&pcs, witness, &mut ch);
+        <Pcs<PrefixProver<F, EF>> as MultilinearPcs<EF, MyChallenger>>::commit(&pcs, witness, &mut ch)
+            .expect("commit");
     let proof = <Pcs<PrefixProver<F, EF>> as MultilinearPcs<EF, MyChallenger>>::open(
         &pcs, prover_data, protocol.clone(), &mut ch,
-    );
+    )
+    .expect("open");
 
     // Verify natively before the proof is handed to any script.
     //
@@ -147,15 +170,12 @@ fn prove() -> (Commit, p3_whir::pcs::proof::PcsProof<F, EF, MyMmcs>) {
     // party: reusing the prover's transcript would assume the thing being
     // checked.
     let mut ch = challenger();
-    let mut ds = DomainSeparator::new(vec![]);
-    pcs.add_domain_separator::<8>(&mut ds);
-    ds.observe_domain_separator(&mut ch);
     <Pcs<PrefixProver<F, EF>> as MultilinearPcs<EF, MyChallenger>>::verify(
-        &pcs, &commitment, &proof, &mut ch, protocol,
+        &pcs, &commitment, &proof, &mut ch, protocol.clone(),
     )
     .expect("Plonky3's own verifier must accept the proof before any script sees it");
 
-    (commitment, proof)
+    (commitment, proof, num_variables, protocol)
 }
 
 /// Produce a real WHIR proof and re-derive its initial sumcheck claim in script.
@@ -704,4 +724,758 @@ fn script_leaf_hash_agrees_with_plonky3_on_a_real_row() {
 /// Named so the test above reads as three independent computations.
 fn reference_hash_row(row: &[u32]) -> Vec<u32> {
     poseidon2::reference::hash_row(row).to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// The transcript Plonky3's verifier actually runs, replayed on the reference.
+//
+// `DomainSeparator` *declares* an observe/sample pattern; what matters to a
+// script re-deriving the challenges is the sequence the verifier *executes*.
+// Every sampler Plonky3 exposes (`sample_algebra_element`, `sample_bits`,
+// `sample_uniform_bits`, `check_witness`) is a trait default over one
+// primitive `sample()`, and every observer bottoms out in `observe(F)`. So a
+// challenger that logs those two primitives and forwards them to the real
+// `DuplexChallenger` records the verifier's whole schedule, values included.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Op {
+    Observe(u32),
+    Sample(u32),
+}
+
+/// `DuplexChallenger` with every primitive `observe`/`sample` logged.
+#[derive(Clone)]
+struct Logger {
+    inner: MyChallenger,
+    log: Vec<Op>,
+}
+
+impl Logger {
+    fn new() -> Self {
+        Self { inner: challenger(), log: Vec::new() }
+    }
+
+    /// `BitSamplingStrategy::sample_value` with `RESAMPLE = true`: draw until
+    /// the field element falls below `m`, through the logged primitive.
+    fn draw_below(&mut self, m: u64) -> u64 {
+        loop {
+            let f: F = self.sample();
+            let v = u64::from(f.as_canonical_u32());
+            if v < m {
+                return v;
+            }
+        }
+    }
+
+    /// The low `bits` bits of a draw uniform on `[0, m_bits)`.
+    fn uniform_chunk(&mut self, bits: usize) -> usize {
+        let m = <F as UniformSamplingField>::SAMPLING_BITS_M[bits];
+        (self.draw_below(m) as usize) & ((1usize << bits) - 1)
+    }
+}
+
+impl CanObserve<F> for Logger {
+    fn observe(&mut self, value: F) {
+        self.log.push(Op::Observe(value.as_canonical_u32()));
+        self.inner.observe(value);
+    }
+}
+
+/// The commitment is a Merkle cap; `DuplexChallenger` absorbs it root by
+/// root, element by element. Named concretely (not through `Commit`): the
+/// alias is a projection, and coherence cannot tell a projection from `F`.
+impl CanObserve<MerkleCap<F, [F; 8]>> for Logger {
+    fn observe(&mut self, cap: MerkleCap<F, [F; 8]>) {
+        for digest in cap.roots() {
+            for value in digest {
+                self.observe(*value);
+            }
+        }
+    }
+}
+
+impl CanSample<F> for Logger {
+    fn sample(&mut self) -> F {
+        let value: F = self.inner.sample();
+        self.log.push(Op::Sample(value.as_canonical_u32()));
+        value
+    }
+}
+
+impl CanSampleBits<usize> for Logger {
+    /// `DuplexChallenger::sample_bits`: one field sample, low bits kept.
+    fn sample_bits(&mut self, bits: usize) -> usize {
+        let f: F = self.sample();
+        (f.as_canonical_u32() as usize) & ((1usize << bits) - 1)
+    }
+}
+
+impl CanSampleUniformBits<F> for Logger {
+    /// `DuplexChallenger::sample_uniform_bits_with_strategy`, over the logged
+    /// primitive. Only the resampling strategy is reachable from the verifier
+    /// (`get_challenge_stir_queries` passes `RESAMPLE = true`), and
+    /// `ResamplingError` has no public constructor, so the other arm is a bug.
+    fn sample_uniform_bits<const RESAMPLE: bool>(
+        &mut self,
+        bits: usize,
+    ) -> Result<usize, ResamplingError> {
+        assert!(RESAMPLE, "the WHIR verifier only ever resamples");
+        if bits == 0 {
+            return Ok(0);
+        }
+        Ok(if bits <= <F as UniformSamplingField>::MAX_SINGLE_SAMPLE_BITS {
+            self.uniform_chunk(bits)
+        } else {
+            let half1 = bits / 2;
+            let half2 = bits - half1;
+            let chunk1 = self.uniform_chunk(half1);
+            let chunk2 = self.uniform_chunk(half2);
+            chunk1 | (chunk2 << half1)
+        })
+    }
+}
+
+impl FieldChallenger<F> for Logger {}
+
+impl GrindingChallenger for Logger {
+    type Witness = F;
+
+    /// Prover-side only; `check_witness` is the trait default over
+    /// `observe` + `sample_bits`, both logged.
+    fn grind(&mut self, _bits: usize) -> F {
+        unreachable!("the logger only stands in for a verifier")
+    }
+}
+
+type LogPcs<L> = WhirProver<EF, F, MyDft, MyMmcs, Logger, L>;
+
+/// Plonky3's logged `observe`/`sample` sequence as a `Sponge`: each call must
+/// match the next logged op. Driving `reference::transcript` through it proves
+/// the transcript's interleaving is the one the verifier executed, and hands
+/// back Plonky3's own draws as the challenges.
+struct LogChecker<'a> {
+    log: &'a [Op],
+    pos: usize,
+}
+
+impl reference::Sponge for LogChecker<'_> {
+    fn observe(&mut self, value: u32) {
+        assert_eq!(
+            self.log.get(self.pos),
+            Some(&Op::Observe(value)),
+            "op {}: the transcript observes {value}",
+            self.pos
+        );
+        self.pos += 1;
+    }
+
+    fn sample(&mut self) -> u32 {
+        match self.log.get(self.pos) {
+            Some(&Op::Sample(v)) => {
+                self.pos += 1;
+                v
+            }
+            other => panic!("op {}: the transcript samples, Plonky3 did {other:?}", self.pos),
+        }
+    }
+}
+
+fn log2_strict(x: usize) -> usize {
+    assert!(x.is_power_of_two(), "{x} is not a power of two");
+    x.trailing_zeros() as usize
+}
+
+fn cap_elements(cap: &Commit) -> Vec<u32> {
+    cap.roots().iter().flat_map(|d| d.iter().map(|x| x.as_canonical_u32())).collect()
+}
+
+fn sumcheck_data(d: &p3_sumcheck::SumcheckData<F, EF>) -> Vec<reference::SumcheckRoundData> {
+    d.polynomial_evaluations
+        .iter()
+        .enumerate()
+        .map(|(i, &[c0, c_inf])| reference::SumcheckRoundData {
+            poly: [ef_coeffs(c0), ef_coeffs(c_inf)],
+            pow_witness: d.pow_witnesses.get(i).map_or(0, |w| w.as_canonical_u32()),
+        })
+        .collect()
+}
+
+/// Plonky3's verifier run through the logger: the executed schedule, from
+/// which the sub-transcripts' seeds are read.
+fn logged_run(
+    pcs: &LogPcs<PrefixProver<F, EF>>,
+    commitment: &Commit,
+    proof: &Proof,
+    protocol: &OpeningProtocol,
+) -> Vec<Op> {
+    let mut ch = Logger::new();
+    <LogPcs<PrefixProver<F, EF>> as MultilinearPcs<EF, Logger>>::verify(
+        pcs, commitment, proof, &mut ch, protocol.clone(),
+    )
+    .expect("the logged verifier is the real one and must accept the proof");
+    ch.log
+}
+
+/// A cursor over a logged run, for reading the seeds off it positionally.
+struct Cursor<'a> {
+    log: &'a [Op],
+    pos: usize,
+}
+
+impl Cursor<'_> {
+    /// The observes up to the next sample.
+    fn observes(&mut self) -> Vec<u32> {
+        let mut out = Vec::new();
+        while let Some(&Op::Observe(v)) = self.log.get(self.pos) {
+            out.push(v);
+            self.pos += 1;
+        }
+        out
+    }
+
+    /// The observes up to the next sample, which must end with `tail`; the
+    /// rest, before it, is returned.
+    fn observes_ending_with(&mut self, tail: &[u32], what: &str) -> Vec<u32> {
+        let mut block = self.observes();
+        assert!(block.ends_with(tail), "{what}: the block does not end with the expected message");
+        block.truncate(block.len() - tail.len());
+        block
+    }
+
+    fn samples(&mut self) -> usize {
+        let start = self.pos;
+        while let Some(&Op::Sample(_)) = self.log.get(self.pos) {
+            self.pos += 1;
+        }
+        self.pos - start
+    }
+
+    fn expect_samples(&mut self, n: usize, what: &str) {
+        assert_eq!(self.samples(), n, "{what}: sample count");
+    }
+
+    fn expect_observes(&mut self, values: &[u32], what: &str) {
+        assert_eq!(self.observes(), values, "{what}: observed message");
+    }
+}
+
+/// The transcript's inputs, read off the config, the proof and a logged run.
+///
+/// Plonky3 0.7 seeds each of its sub-transcripts with a domain separator that
+/// is a constant of the configuration. The seeds are read positionally off
+/// the logged run, between the messages and draws the proof fixes; the WHIR
+/// run's own is cross-checked against `WhirShape::domain_separator`.
+fn transcript_inputs(
+    pcs: &LogPcs<PrefixProver<F, EF>>,
+    protocol: &OpeningProtocol,
+    commitment: &Commit,
+    proof: &Proof,
+    log: &[Op],
+) -> (reference::TranscriptConfig, reference::TranscriptData) {
+    let c: &WhirConfig<EF, F, Logger> = pcs;
+    let fr = c.final_round_config();
+    let cfg = reference::TranscriptConfig {
+        commitment_ood_samples: c.commitment_ood_samples(),
+        initial_folding: c.round_folding_factor(0),
+        initial_folding_pow_bits: c.starting_folding_pow_bits(),
+        rounds: c
+            .round_parameters()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| reference::RoundConfig {
+                ood_samples: r.ood_samples,
+                pow_bits: r.pow_bits,
+                num_queries: r.num_queries,
+                domain_bits: log2_strict(r.domain_size >> r.folding_factor),
+                folding: c.round_folding_factor(i + 1),
+                folding_pow_bits: r.folding_pow_bits,
+            })
+            .collect(),
+        final_pow_bits: fr.pow_bits,
+        final_queries: fr.num_queries,
+        final_domain_bits: log2_strict(fr.domain_size >> fr.folding_factor),
+        final_sumcheck_rounds: c.final_sumcheck_rounds(),
+        final_folding_pow_bits: c.final_folding_pow_bits(),
+    };
+
+    let w = &proof.whir;
+    let root = cap_elements(commitment);
+    let initial_ood_answers: Vec<[u32; 4]> = w.initial_ood_answers.iter().map(|&e| ef_coeffs(e)).collect();
+    let openings: Vec<Vec<[u32; 4]>> = proof
+        .evals
+        .iter()
+        .map(|b| b.current().iter().chain(b.next()).map(|&e| ef_coeffs(e)).collect())
+        .collect();
+    let initial_sumcheck = sumcheck_data(&w.initial_sumcheck);
+    let final_poly: Vec<[u32; 4]> =
+        w.final_poly.as_ref().expect("final polynomial").as_slice().iter().map(|&e| ef_coeffs(e)).collect();
+    let final_sumcheck = w.final_sumcheck.as_ref().map_or_else(Vec::new, sumcheck_data);
+    let flat = |efs: &[[u32; 4]]| -> Vec<u32> { efs.iter().flatten().copied().collect() };
+    let poly = |r: &reference::SumcheckRoundData| -> Vec<u32> { flat(&r.poly) };
+
+    // Every seed sits between a draw and the message that follows it (or the
+    // root, for the first), so each is what remains of an observe block once
+    // the message it ends with is taken off.
+    let mut cur = Cursor { log, pos: 0 };
+    let head = cur.observes();
+    let at_root = head.windows(root.len()).position(|w| w == root).expect("the root is absorbed first");
+    let seed_commitment = head[..at_root].to_vec();
+    let mut carry = head[at_root + root.len()..].to_vec();
+    let mut seed_virtual = Vec::new();
+    for answer in &initial_ood_answers {
+        seed_virtual.push(std::mem::take(&mut carry));
+        cur.expect_samples(4, "OOD point");
+        carry = cur.observes_ending_with(&[], "OOD answer");
+        assert!(carry.starts_with(answer), "the OOD answer follows its point");
+        carry.drain(..4);
+    }
+    let mut seed_claim = Vec::new();
+    for evals in &openings {
+        seed_claim.push(std::mem::take(&mut carry));
+        cur.expect_samples(4, "claim point");
+        carry = cur.observes();
+        let evals = flat(evals);
+        assert!(carry.starts_with(&evals), "the evaluations follow their point");
+        carry.drain(..evals.len());
+    }
+    // The WHIR seed then the batching seed: the WHIR seed is what the shape's
+    // domain separator produces, checked here.
+    let mut api = Logger::new();
+    WhirShape::new(c, protocol.num_openings()).domain_separator::<F, EF>().seed(&mut api);
+    let seed_whir: Vec<u32> = api.log.iter().map(|op| match *op {
+        Op::Observe(v) => v,
+        Op::Sample(_) => unreachable!("a seed is only absorbed"),
+    }).collect();
+    assert!(carry.starts_with(&seed_whir), "the WHIR run seeds with its shape's domain separator");
+    let seed_batching = carry[seed_whir.len()..].to_vec();
+    cur.expect_samples(4, "alpha");
+    let seed_initial_sumcheck = cur.observes_ending_with(&poly(&initial_sumcheck[0]), "initial sumcheck");
+    cur.expect_samples(4, "initial folding");
+    for r in &initial_sumcheck[1..] {
+        cur.expect_observes(&poly(r), "initial sumcheck round");
+        cur.expect_samples(4, "initial folding");
+    }
+    let rounds: Vec<reference::RoundData> = w
+        .rounds
+        .iter()
+        .map(|r| {
+            let root = cap_elements(r.commitment.as_ref().expect("round commitment"));
+            let ood_answers: Vec<[u32; 4]> = r.ood_answers.iter().map(|&e| ef_coeffs(e)).collect();
+            let sumcheck = sumcheck_data(&r.sumcheck);
+            cur.expect_observes(&root, "round root");
+            for a in &ood_answers {
+                cur.expect_samples(4, "round OOD point");
+                cur.expect_observes(a, "round OOD answer");
+            }
+            // The queries and the combination randomness, one run of draws.
+            assert!(cur.samples() >= 4, "round draws");
+            let seed_sumcheck = cur.observes_ending_with(&poly(&sumcheck[0]), "round sumcheck");
+            cur.expect_samples(4, "round folding");
+            for sr in &sumcheck[1..] {
+                cur.expect_observes(&poly(sr), "round sumcheck round");
+                cur.expect_samples(4, "round folding");
+            }
+            reference::RoundData {
+                root,
+                ood_answers,
+                pow_witness: r.pow_witness.as_canonical_u32(),
+                seed_sumcheck,
+                sumcheck,
+            }
+        })
+        .collect();
+    cur.expect_observes(&flat(&final_poly), "final polynomial");
+    assert!(cur.samples() > 0, "final draws");
+    let seed_final_sumcheck = cur.observes_ending_with(&poly(&final_sumcheck[0]), "final sumcheck");
+    cur.expect_samples(4, "final folding");
+    for r in &final_sumcheck[1..] {
+        cur.expect_observes(&poly(r), "final sumcheck round");
+        cur.expect_samples(4, "final folding");
+    }
+    assert_eq!(cur.pos, log.len(), "the run ends with the final sumcheck");
+
+    let data = reference::TranscriptData {
+        seed_commitment,
+        seed_virtual,
+        seed_claim,
+        seed_whir,
+        seed_batching,
+        seed_initial_sumcheck,
+        seed_final_sumcheck,
+        root,
+        initial_ood_answers,
+        openings,
+        initial_sumcheck,
+        rounds,
+        final_poly,
+        final_pow_witness: w.final_pow_witness.as_canonical_u32(),
+        final_sumcheck,
+    };
+    (cfg, data)
+}
+
+/// The log as runs, `O<n>` observes then `S<n>` samples, for reading.
+fn runs(log: &[Op]) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < log.len() {
+        let observing = matches!(log[i], Op::Observe(_));
+        let start = i;
+        while i < log.len() && matches!(log[i], Op::Observe(_)) == observing {
+            i += 1;
+        }
+        out.push(format!("{}{}", if observing { 'O' } else { 'S' }, i - start));
+    }
+    out.join(" ")
+}
+
+/// Plonky3's verifier, run through the logger on a real proof, and every
+/// challenge it drew re-derived by `reference::Challenger` from the same
+/// observations. Establishes that the reference sponge plus the *executed*
+/// schedule reproduces Plonky3, which is what a script transcript must do.
+#[test]
+fn plonky3_verifier_transcript_replays_on_the_reference_challenger() {
+    // Six variables give no intermediate round; eight give one, so the round
+    // loop (root, OOD, STIR queries, combination) is replayed too.
+    for num_vars in [6usize, 8] {
+        replay_at(num_vars);
+    }
+}
+
+fn replay_at(num_vars: usize) {
+    NUM_VARS.with(|v| *v.borrow_mut() = num_vars);
+    let (commitment, proof, num_variables, protocol) = prove_full();
+
+    // A verifier typed on the logger. Same parameters, so the same config.
+    let perm = default_koalabear_poseidon2_16();
+    let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
+    let config =
+        WhirConfig::<EF, F, Logger>::new(num_variables, params(num_variables)).expect("config");
+    let pcs = LogPcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
+
+    let mut ch = Logger::new();
+    <LogPcs<PrefixProver<F, EF>> as MultilinearPcs<EF, Logger>>::verify(
+        &pcs, &commitment, &proof, &mut ch, protocol.clone(),
+    )
+    .expect("the logged verifier is the real one and must accept the proof");
+
+    // Replay: feed the reference the same observations, demand the same draws.
+    let mut reference = reference::Challenger::new();
+    let (mut observed, mut sampled) = (0usize, 0usize);
+    for (i, op) in ch.log.iter().enumerate() {
+        match *op {
+            Op::Observe(v) => {
+                reference.observe(v);
+                observed += 1;
+            }
+            Op::Sample(v) => {
+                sampled += 1;
+                assert_eq!(reference.sample(), v, "challenge {sampled} (transcript op {i}) diverged");
+            }
+        }
+    }
+    assert!(sampled > 0, "the verifier drew no challenges");
+    assert_eq!(
+        reference.state(),
+        ch.inner.sponge_state.map(|x| x.as_canonical_u32()),
+        "sponge states differ after the full transcript"
+    );
+    // Stage 2: the transcript as a function of config and proof. Driven
+    // through the log it must match Plonky3 op for op and consume all of it;
+    // driven through the reference sponge it must draw the same challenges.
+    let (cfg, data) = transcript_inputs(&pcs, &protocol, &commitment, &proof, &ch.log);
+    let mut checker = LogChecker { log: &ch.log, pos: 0 };
+    let from_log = reference::transcript(&cfg, &data, &mut checker);
+    assert_eq!(checker.pos, ch.log.len(), "the transcript stopped short of Plonky3's");
+    let from_reference = reference::transcript(&cfg, &data, &mut reference::Challenger::new());
+    assert_eq!(from_log, from_reference, "reference sponge draws differ from Plonky3's");
+    assert!(from_log.pow_ok);
+
+    // Stage 3: the script. The transcript emitted from the same inputs must
+    // check every draw against the reference's and end in Plonky3's own
+    // sponge state, with the challenges it derived equal to Plonky3's.
+    let (emitter, from_script) =
+        whir::transcript::transcript(&cfg, &data, whir::transcript::Mode::Check);
+    assert_eq!(from_script, from_log, "script transcript draws differ from Plonky3's");
+    let body = emitter.script();
+    let got = run(script! {
+        for v in emitter.stream.iter().rev() { { *v } OP_TOALTSTACK }
+        for _ in 0..16 { 0 }
+        { body.clone() }
+    });
+    assert_eq!(
+        got,
+        ch.inner.sponge_state.map(|x| x.as_canonical_u32()).to_vec(),
+        "script sponge state differs from Plonky3's"
+    );
+    eprintln!(
+        "script transcript: {} permutations, {} bytes",
+        emitter.permutations,
+        body.len()
+    );
+    eprintln!(
+        "queries: rounds {:?}, final {} ({} distinct)",
+        from_log.rounds.iter().map(|r| r.queries.len()).collect::<Vec<_>>(),
+        from_log.final_queries.len(),
+        from_log.final_queries.iter().collect::<std::collections::BTreeSet<_>>().len()
+    );
+    eprintln!(
+        "{num_vars} vars -> {} padded, {} rounds {:?}, final sumcheck {}, final queries {}\n\
+         transcript: {observed} observes, {sampled} samples over {} ops\nschedule: {}",
+        pcs.num_variables(),
+        pcs.n_rounds(),
+        pcs.round_parameters(),
+        pcs.final_sumcheck_rounds(),
+        pcs.terminal().num_queries,
+        ch.log.len(),
+        runs(&ch.log)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The reference verifier on real proofs.
+// ---------------------------------------------------------------------------
+
+fn opening(o: &p3_whir::pcs::proof::QueryOpenings<F, EF, <MyMmcs as p3_commit::Mmcs<F>>::MultiProof>) -> reference::Opening {
+    use p3_whir::pcs::proof::QueryOpenings;
+    let digests = |sibs: &Vec<[F; 8]>| -> Vec<[u32; 8]> {
+        sibs.iter().map(|d| d.map(|x| x.as_canonical_u32())).collect()
+    };
+    match o {
+        QueryOpenings::Base(s) => reference::Opening {
+            extension: false,
+            rows: s.rows.iter().map(|r| r.iter().map(|x| x.as_canonical_u32()).collect()).collect(),
+            boundaries: digests(&s.proof.sibling_hashes),
+        },
+        QueryOpenings::Extension(s) => reference::Opening {
+            extension: true,
+            rows: s.rows.iter().map(|r| r.iter().flat_map(|&e| ef_coeffs(e)).collect()).collect(),
+            boundaries: digests(&s.proof.sibling_hashes),
+        },
+    }
+}
+
+/// The verifier's inputs for a single-table protocol.
+fn verify_inputs(
+    pcs: &LogPcs<PrefixProver<F, EF>>,
+    protocol: &OpeningProtocol,
+    commitment: &Commit,
+    proof: &Proof,
+) -> (reference::VerifyConfig, reference::VerifyData) {
+    let log = logged_run(pcs, commitment, proof, protocol);
+    let (transcript_cfg, transcript_data) = transcript_inputs(pcs, protocol, commitment, proof, &log);
+    let c: &WhirConfig<EF, F, Logger> = pcs;
+
+    // `plan_layout` for one table: `k = log2_ceil(width * 2^arity)`, and
+    // column `col` gets selector index `col` over `k - arity` variables.
+    // `PrefixProver` then bit-reverses the index, so the coordinates read the
+    // column's bits least significant first.
+    let shapes = protocol.table_shapes();
+    assert_eq!(shapes.len(), 1, "the reference builds the layout of one table");
+    let (arity, width) = (shapes[0].num_variables(), shapes[0].width());
+    let k = (width << arity).next_power_of_two().trailing_zeros() as usize;
+    assert_eq!(k, c.num_variables());
+    let sel_vars = k - arity;
+    let claims = protocol
+        .iter_openings()
+        .map(|(_, batch)| {
+            assert!(batch.next().is_empty(), "next openings are not modelled");
+            reference::ClaimShape {
+                row_vars: arity,
+                selectors: batch
+                    .current()
+                    .iter()
+                    .map(|&col| {
+                        (0..sel_vars).map(|i| [((col >> i) & 1) as u32, 0, 0, 0]).collect()
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+
+    let cfg = reference::VerifyConfig {
+        transcript: transcript_cfg,
+        num_variables: k,
+        claims,
+        rounds: c
+            .round_parameters()
+            .iter()
+            .map(|r| reference::RoundMath {
+                num_variables: r.num_variables,
+                folded_domain_gen: F::two_adic_generator(r.log_folded_domain_size).as_canonical_u32(),
+            })
+            .collect(),
+        final_folded_domain_gen: F::two_adic_generator(c.final_round_config().log_folded_domain_size)
+            .as_canonical_u32(),
+    };
+    let data = reference::VerifyData {
+        transcript: transcript_data,
+        round_openings: proof.whir.rounds.iter().map(|r| opening(&r.openings)).collect(),
+        final_opening: opening(&proof.whir.final_openings),
+    };
+    (cfg, data)
+}
+
+/// Plonky3's proof, accepted by the reference verifier's arithmetic, and
+/// rejected once any prover message it relies on is touched.
+#[test]
+fn plonky3_proof_verifies_in_the_reference_verifier() {
+    for num_vars in [6usize, 8] {
+        NUM_VARS.with(|v| *v.borrow_mut() = num_vars);
+        let (commitment, proof, num_variables, protocol) = prove_full();
+        let perm = default_koalabear_poseidon2_16();
+        let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
+        let config =
+            WhirConfig::<EF, F, Logger>::new(num_variables, params(num_variables)).expect("config");
+        let pcs = LogPcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
+
+        let (cfg, data) = verify_inputs(&pcs, &protocol, &commitment, &proof);
+        let ok = reference::verify(&cfg, &data).unwrap_or_else(|e| panic!("{num_vars} vars: {e:?}"));
+        eprintln!(
+            "{num_vars} vars: accepted; claim {:?}, weights {:?}, final value {:?}",
+            ok.claimed, ok.weights, ok.final_value
+        );
+
+        // Every prover message is absorbed, so touching one moves the query
+        // indices and the proof's openings no longer sit where the transcript
+        // looks: the Merkle check is the first to fail.
+        for (what, bad) in [
+            ("final polynomial", {
+                let mut d = data.clone();
+                d.transcript.final_poly[0][0] ^= 1;
+                d
+            }),
+            ("sumcheck message", {
+                let mut d = data.clone();
+                d.transcript.initial_sumcheck[0].poly[0][0] ^= 1;
+                d
+            }),
+            ("opened row", {
+                let mut d = data.clone();
+                d.final_opening.rows[0][0] ^= 1;
+                d
+            }),
+        ] {
+            let err = reference::verify(&cfg, &bad).expect_err(what);
+            assert!(
+                matches!(err, reference::VerifyError::Merkle { .. } | reference::VerifyError::Opening { .. }),
+                "{num_vars} vars: a changed {what} must fail at the openings, got {err:?}"
+            );
+        }
+
+        // Only the arithmetic sees a wrong parameter. The final domain's
+        // generator moves the STIR points off the folds; a selector coordinate
+        // moves an initial claim point, which the closing identity catches.
+        let mut wrong = cfg.clone();
+        wrong.final_folded_domain_gen ^= 1;
+        assert!(
+            matches!(reference::verify(&wrong, &data), Err(reference::VerifyError::FinalStir { .. })),
+            "{num_vars} vars: a wrong final generator must fail the STIR check"
+        );
+        let mut wrong = cfg.clone();
+        wrong.claims[0].selectors[0][0] = [1, 0, 0, 0];
+        assert!(
+            matches!(reference::verify(&wrong, &data), Err(reference::VerifyError::Closing { .. })),
+            "{num_vars} vars: a wrong claim point must fail the closing identity"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The whole verifier in Bitcoin Script, on real proofs.
+// ---------------------------------------------------------------------------
+
+/// `execute_script` without the 1000-item stack limit.
+///
+/// A 35-query proof's Merkle data alone is over that limit; a deployment
+/// chunks the verification across transactions. Whether the script verifies
+/// is a separate question from how it is split, and the one asked here.
+fn run_unbounded(script: bitcoin::ScriptBuf) -> bitcoin_scriptexec::ExecuteInfo {
+    use bitcoin::hashes::Hash;
+    use bitcoin_scriptexec::{Exec, ExecCtx, ExecuteInfo, FmtStack, Options, TxTemplate};
+    let mut exec = Exec::new(
+        ExecCtx::Tapscript,
+        Options { enforce_stack_limit: false, ..Options::default() },
+        TxTemplate {
+            tx: bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+                input: vec![],
+                output: vec![],
+            },
+            prevouts: vec![],
+            input_idx: 0,
+            taproot_annex_scriptleaf: Some((bitcoin::TapLeafHash::all_zeros(), None)),
+        },
+        script,
+        vec![],
+    )
+    .expect("exec");
+    while exec.exec_next().is_ok() {}
+    let res = exec.result().expect("result");
+    ExecuteInfo {
+        success: res.success,
+        error: res.error.clone(),
+        last_opcode: res.opcode,
+        final_stack: FmtStack(exec.stack().clone()),
+        remaining_script: exec.remaining_script().to_asm_string(),
+        stats: exec.stats().clone(),
+    }
+}
+
+/// Plonky3's proof, verified end to end by the script `proof_script::build`
+/// emits: the transcript on the script's own sponge, every opening hashed and
+/// walked to its root, every fold, the STIR checks and the closing identity.
+#[test]
+fn plonky3_proof_verifies_end_to_end_in_bitcoin_script() {
+    for num_vars in [6usize, 8] {
+        NUM_VARS.with(|v| *v.borrow_mut() = num_vars);
+        let (commitment, proof, num_variables, protocol) = prove_full();
+        let perm = default_koalabear_poseidon2_16();
+        let mmcs = MyMmcs::new(MyHash::new(perm.clone()), MyCompress::new(perm), 0);
+        let config =
+            WhirConfig::<EF, F, Logger>::new(num_variables, params(num_variables)).expect("config");
+        let pcs = LogPcs::<PrefixProver<F, EF>>::new(config, MyDft::default(), mmcs);
+        let (cfg, data) = verify_inputs(&pcs, &protocol, &commitment, &proof);
+        reference::verify(&cfg, &data).expect("the reference accepts");
+
+        let built = whir::proof_script::build(&cfg, &data).expect("a valid proof builds");
+        let info = run_unbounded(built.script.clone());
+        assert!(
+            info.error.is_none(),
+            "{num_vars} vars: the script rejected a valid proof: {:?} at {:?}",
+            info.error,
+            info.last_opcode
+        );
+        eprintln!(
+            "{num_vars} vars: verified in script; {} bytes, {} data elements, peak stack {}, transcript permutations {}",
+            built.script.len(),
+            built.data.len(),
+            info.stats.max_nb_stack_items,
+            built.transcript_permutations
+        );
+
+        // The script must not merely run: a wrong parameter or a wrong prover
+        // message has to fail it. A message changed after the openings were
+        // made moves the queries off the openings, which the builder already
+        // cannot lay out; that counts as a rejection too.
+        let rejects = |cfg: &reference::VerifyConfig, data: &reference::VerifyData| -> bool {
+            match whir::proof_script::build(cfg, data) {
+                Ok(built) => run_unbounded(built.script).error.is_some(),
+                Err(_) => true,
+            }
+        };
+        let mut wrong = cfg.clone();
+        wrong.final_folded_domain_gen ^= 1;
+        assert!(rejects(&wrong, &data), "{num_vars} vars: wrong final generator");
+
+        let mut bad_data = data.clone();
+        bad_data.final_opening.rows[0][0] ^= 1;
+        assert!(rejects(&cfg, &bad_data), "{num_vars} vars: changed row");
+
+        let mut bad_data = data.clone();
+        bad_data.transcript.final_poly[0][0] ^= 1;
+        assert!(rejects(&cfg, &bad_data), "{num_vars} vars: changed final polynomial");
+    }
 }

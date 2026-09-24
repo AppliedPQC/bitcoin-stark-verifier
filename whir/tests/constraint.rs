@@ -577,3 +577,171 @@ fn constraint_eval_at_steps_over_what_sits_above() {
         assert_eq!(&got[4 * under..], want.as_slice(), "under = {under}: wrong weight");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deriving the constraints instead of being handed them
+// ---------------------------------------------------------------------------
+
+/// One group: the scalars in order, then the challenge -- the order a round
+/// samples them in, and so the order it can bury them in.
+fn batched_group_to_altstack(chi: [u32; 4], scalars: &[[u32; 4]]) -> bitcoin::ScriptBuf {
+    script! {
+        { push_ef(chi) } for _ in 0..4 { OP_TOALTSTACK }
+        for u in scalars.iter().rev() { { push_ef(*u) } for _ in 0..4 { OP_TOALTSTACK } }
+    }
+}
+
+fn batched_groups_to_altstack(
+    groups: &[([u32; 4], Vec<[u32; 4]>, usize)],
+) -> bitcoin::ScriptBuf {
+    script! {
+        for (chi, scalars, _) in groups.iter().rev() {
+            { batched_group_to_altstack(*chi, scalars) }
+        }
+    }
+}
+
+#[test]
+fn batched_matches_the_reference() {
+    let mut rng = ChaCha20Rng::seed_from_u64(61);
+    let total = 6usize;
+    let r: Vec<[u32; 4]> = (0..total).map(|_| rand_ef(&mut rng)).collect();
+
+    // Rounds shrinking the way a schedule does, and one out of order.
+    let shape = [(3usize, 6usize), (2, 4), (4, 5), (1, 1)];
+    let groups: Vec<([u32; 4], Vec<[u32; 4]>, usize)> = shape
+        .iter()
+        .map(|&(n, arity)| {
+            (rand_ef(&mut rng), (0..n).map(|_| rand_ef(&mut rng)).collect(), arity)
+        })
+        .collect();
+    let want = reference::constraint_eval_batched(&r, &groups);
+
+    let shape_pairs: Vec<(usize, usize)> = shape.to_vec();
+    let got = run(script! {
+        { batched_groups_to_altstack(&groups) }
+        { push_randomness(&r) }
+        { constraint::constraint_eval_batched(total, &shape_pairs) }
+    });
+    assert_eq!(got.len(), 4, "the randomness was not consumed");
+    assert_eq!(got, want.to_vec(), "the derived weight disagrees with the reference");
+}
+
+/// The powers start at one, which is Plonky3's convention and not the paper's.
+///
+/// `Constraint::challenge_powers` is `shifted_powers(chi^shift)`, so the first
+/// constraint in a group is weighted by `chi^0 = 1`. The `sigma'` update in the
+/// same protocol uses `gamma^(i+1)`, starting at the challenge itself. Two
+/// conventions in one protocol is exactly the sort of thing both a script and a
+/// reference written by the same hand would get wrong together, so this pins the
+/// two-constraint case against the expression by hand.
+#[test]
+fn batched_weights_start_at_one() {
+    let mut rng = ChaCha20Rng::seed_from_u64(62);
+    let arity = 3usize;
+    let r: Vec<[u32; 4]> = (0..arity).map(|_| rand_ef(&mut rng)).collect();
+    let chi = rand_ef(&mut rng);
+    let u0 = rand_ef(&mut rng);
+    let u1 = rand_ef(&mut rng);
+
+    let e0 = reference::eq_eval(&reference::expand_univariate(u0, arity), &r);
+    let e1 = reference::eq_eval(&reference::expand_univariate(u1, arity), &r);
+    // e0 * chi^0 + e1 * chi^1, written out.
+    let by_hand = pf::ext4::add(e0, pf::ext4::mul(chi, e1));
+
+    let got = run(script! {
+        { batched_group_to_altstack(chi, &[u0, u1]) }
+        { push_randomness(&r) }
+        { constraint::constraint_eval_batched(arity, &[(2, arity)]) }
+    });
+    assert_eq!(got, by_hand.to_vec(), "the first weight is not one");
+}
+
+/// Every scalar and every challenge reaches the accumulated weight.
+#[test]
+fn every_derived_constraint_reaches_the_weight() {
+    let mut rng = ChaCha20Rng::seed_from_u64(63);
+    let total = 4usize;
+    let r: Vec<[u32; 4]> = (0..total).map(|_| rand_ef(&mut rng)).collect();
+    let shape = [(2usize, 4usize), (3, 2)];
+    let groups: Vec<([u32; 4], Vec<[u32; 4]>, usize)> = shape
+        .iter()
+        .map(|&(n, arity)| {
+            (rand_ef(&mut rng), (0..n).map(|_| rand_ef(&mut rng)).collect(), arity)
+        })
+        .collect();
+    let shape_pairs: Vec<(usize, usize)> = shape.to_vec();
+
+    let eval = |gs: &[([u32; 4], Vec<[u32; 4]>, usize)]| {
+        run(script! {
+            { batched_groups_to_altstack(gs) }
+            { push_randomness(&r) }
+            { constraint::constraint_eval_batched(total, &shape_pairs) }
+        })
+    };
+    let want = eval(&groups);
+
+    for gi in 0..groups.len() {
+        let mut bad = groups.to_vec();
+        bad[gi].0[0] = pf::add(bad[gi].0[0], 1);
+        // A single-constraint group is weighted by chi^0 only, so its challenge
+        // genuinely does not matter -- stating that is better than asserting a
+        // sensitivity that does not exist.
+        if groups[gi].1.len() > 1 {
+            assert_ne!(eval(&bad), want, "group {gi}: the batching challenge was ignored");
+        }
+        for j in 0..groups[gi].1.len() {
+            let mut bad = groups.to_vec();
+            bad[gi].1[j][0] = pf::add(bad[gi].1[j][0], 1);
+            assert_ne!(eval(&bad), want, "group {gi} scalar {j}: ignored");
+        }
+    }
+}
+
+/// What deriving the constraints costs, against being handed them.
+#[test]
+fn report_batched_size() {
+    println!("\n  constraint_eval, supplied pairs vs derived from scalars");
+    println!("  ------------------------------------------------------");
+    for arity in [4usize, 8, 16] {
+        let supplied = constraint::constraint_eval(arity, &[(10, arity)]).len();
+        let derived = constraint::constraint_eval_batched(arity, &[(10, arity)]).len();
+        println!(
+            "  arity {arity:>2}, 10 constraints:  supplied {supplied:>10} B   derived {derived:>10} B   \
+             ({:+.1}%)",
+            100.0 * (derived as f64 - supplied as f64) / supplied as f64
+        );
+    }
+    println!();
+}
+
+/// The batched form with values above the randomness, as `close` calls it.
+#[test]
+fn batched_steps_over_what_sits_above() {
+    let mut rng = ChaCha20Rng::seed_from_u64(64);
+    let total = 4usize;
+    let r: Vec<[u32; 4]> = (0..total).map(|_| rand_ef(&mut rng)).collect();
+    let shape = [(2usize, 4usize), (3, 2)];
+    let groups: Vec<([u32; 4], Vec<[u32; 4]>, usize)> = shape
+        .iter()
+        .map(|&(n, arity)| {
+            (rand_ef(&mut rng), (0..n).map(|_| rand_ef(&mut rng)).collect(), arity)
+        })
+        .collect();
+    let want = reference::constraint_eval_batched(&r, &groups);
+    let shape_pairs: Vec<(usize, usize)> = shape.to_vec();
+
+    for under in 0..3usize {
+        let above: Vec<[u32; 4]> = (0..under).map(|_| rand_ef(&mut rng)).collect();
+        let got = run(script! {
+            { batched_groups_to_altstack(&groups) }
+            { push_randomness(&r) }
+            for x in above.iter() { { push_ef(*x) } }
+            { constraint::constraint_eval_batched_at(total, &shape_pairs, under) }
+        });
+        assert_eq!(got.len(), 4 * (under + 1), "under = {under}: wrong stack shape");
+        assert_eq!(&got[..4 * under], above.concat().as_slice(),
+                   "under = {under}: the values above the randomness were disturbed");
+        assert_eq!(&got[4 * under..], want.as_slice(), "under = {under}: wrong weight");
+    }
+}
