@@ -676,3 +676,26 @@ fn full_verifier_circuit_on_the_2_18_schedule() {
     let log_height = std::env::var("WHIR_GC_LOG_HEIGHT").ok().map_or(18, |s| s.parse().expect("a log height"));
     streamed_case(log_height);
 }
+
+/// Plonky3's own security assessment of the configurations measured: every
+/// soundness term of the multi-STARK statement and their composition.
+#[test]
+fn security_of_the_measured_configurations() {
+    let air = KeccakBinaryAir::assuming_boolean_trace();
+    for log_height in [5usize, 8, 12, 16, 18] {
+        let p = params(log_height);
+        let (cfg, packed) = config(&p);
+        let (mut ch, _) = challenger(false);
+        let (_pk, vk) = setup(&cfg, &[&air], &mut ch).expect("setup");
+        let instances = VerifierInstances::new(vec![VerifierInstance::new(&air, &vk, log_height, &[])]);
+        let report = p3_multi_stark::security::security_report(&cfg, &instances).expect("security report");
+        eprintln!(
+            "2^{log_height} rows, {packed} packed variables: {:.2} bits composed; unassessed {:?}",
+            report.security_bits().unwrap_or(f64::NAN),
+            report.unassessed_components()
+        );
+        for term in report.terms() {
+            eprintln!("    {term:?}");
+        }
+    }
+}
