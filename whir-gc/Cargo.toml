@@ -27,6 +27,8 @@ p3-symmetric.workspace = true
 p3-sumcheck.workspace = true
 p3-keccak-air.workspace = true
 p3-multi-stark.workspace = true
+# The prover and its grinding on rayon (RAYON_NUM_THREADS sets the cores).
+p3-maybe-rayon = { workspace = true, features = ["parallel"] }
 p3-matrix.workspace = true
 p3-multilinear-util.workspace = true
 postcard = { version = "1", features = ["alloc"] }

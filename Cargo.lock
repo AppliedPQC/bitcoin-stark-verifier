@@ -749,7 +749,7 @@ dependencies = [
 [[package]]
 name = "garbled-snark-verifier"
 version = "0.1.0"
-source = "git+https://github.com/GOATNetwork/bitvm-gc?rev=ac36788#ac3678830d15d7d5be471e1fc7d43f07de039faf"
+source = "git+https://github.com/GOATNetwork/bitvm-gc?rev=576d5d9#576d5d911387579c6727e9a8793bf501d1814f1c"
 dependencies = [
  "ark-bn254",
  "ark-crypto-primitives",
@@ -1261,6 +1261,9 @@ dependencies = [
 name = "p3-maybe-rayon"
 version = "0.7.0"
 source = "git+https://github.com/Plonky3/Plonky3?rev=ca4da2daa2e0dfdd31419af5c870813083398955#ca4da2daa2e0dfdd31419af5c870813083398955"
+dependencies = [
+ "rayon",
+]
 
 [[package]]
 name = "p3-mds"
@@ -2130,6 +2133,7 @@ dependencies = [
  "p3-field",
  "p3-keccak-air",
  "p3-matrix",
+ "p3-maybe-rayon",
  "p3-merkle-tree",
  "p3-multi-stark",
  "p3-multilinear-util",

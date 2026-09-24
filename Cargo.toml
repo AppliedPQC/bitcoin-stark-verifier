@@ -40,10 +40,11 @@ p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfd
 p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
 p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
 p3-multi-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
 # GOAT's garbler and circuit API (BitVM's `garbled-snark-verifier`, modified).
 # `_blake3` makes Blake3 the garbling PRF; with no feature the crate's `hash`
 # returns zeros, and AES is not an option here.
-garbled-snark-verifier = { git = "https://github.com/GOATNetwork/bitvm-gc", rev = "ac36788", features = ["_blake3"] }
+garbled-snark-verifier = { git = "https://github.com/GOATNetwork/bitvm-gc", rev = "576d5d9", features = ["_blake3"] }
 rand = "0.9.1"
 rand_chacha = "0.9.0"
 # Plonky3 pins rand 0.10, which has a different rand_core than the 0.9 the rest
