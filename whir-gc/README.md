@@ -255,6 +255,45 @@ and guarded by checks (nonzero `tau` draws, no Boolean prefix on the column
 point), each rejecting where Plonky3 would continue with probability
 ~2^-127 per coordinate, never the reverse.
 
+## KoalaBear and Poseidon2, measured
+
+The question this crate exists to answer for the other half of the repository:
+what would the KoalaBear, Poseidon2-committed verifier of the `whir` and
+`poseidon2` crates cost as a garbled circuit? `koala` implements KoalaBear
+(`p = 2^31 − 2^24 + 1`) and Poseidon2 over it on wires -- 31-bit elements,
+carry-save compression at one AND per full adder, reduction by folding
+`2^31 ≡ 2^24 − 1` and conditional subtractions -- checked against the
+`poseidon2` crate's reference, which is checked against Plonky3:
+
+| gadget | AND gates | for comparison |
+| --- | ---: | --- |
+| `koala::add` / `sub` | 70 / 94 | |
+| `koala::mul` (31-bit modular) | **3,451** | `GF(2^128)` multiplication: 2,187 |
+| `koala::sbox` (`x^3`) | 6,871 | |
+| `koala::div_2exp` by 2, 2^8, 2^24 | 54, 432, 2,128 | |
+| `koala::ext_mul`, degree-4 extension, schoolbook | **60,615** | `GF(2^128)` multiplication: 2,187 |
+| `koala::permute`, Poseidon2 width 16 | **1,240,747** | Blake3 compression: 10,281 |
+| `koala::hash_row`, 64 elements (8 permutations) | 9,924,068 | Blake3 of 256 bytes: 41,511 |
+
+A Poseidon2 permutation is 120 Blake3 compressions; the 148 S-boxes are 1.0M
+of it and the linear layers, with their halvings, 0.2M. An extension
+multiplication is 28 tower multiplications (a Karatsuba version would be
+about 40,000, still 18×). Applied to the `whir` crate's 2^20 KoalaBear
+configuration (2,157 permutations: 1,300 in paths, 800 in leaves, 57 in the
+transcript; about 7,500 extension multiplications):
+
+| the same WHIR opening as a circuit | hashing | arithmetic | total |
+| --- | ---: | ---: | ---: |
+| KoalaBear, Poseidon2 (as the `whir` crate verifies it) | 2.68G | ~0.45G | **~3.1G**, above `bitvm-gc`'s Groth16 verifier |
+| KoalaBear, Blake3 in place of Poseidon2 | 19M | ~0.45G (~0.3G with Karatsuba) | **~0.3G to 0.5G** |
+| `GF(2^128)`, Blake3 (measured, 2^18) | 16M | 5M | **21M** |
+
+Poseidon2 alone puts the KoalaBear verifier at the Groth16 circuit's size;
+with the hash swapped, the extension arithmetic still leaves it 15 to 20×
+the binary-field verifier, and in a full STARK every opened extension value
+costs about 125,000 gates against 4,400. The proof handed to a garbled
+verifier should be binary-field native.
+
 ## Layout
 
 | module | what |
@@ -265,6 +304,7 @@ point), each rejecting where Plonky3 would continue with probability
 | `reference` | the WHIR verifier on field elements, op for op with Plonky3 |
 | `circuit` | the WHIR verifier on wires, with a prefix hook and a gate profile |
 | `stark`, `stark_circuit` | the multi-STARK layers (zerocheck, column batching, bit ring switch) as reference and as wires |
+| `koala` | KoalaBear and Poseidon2 on wires, for the comparison above |
 | `garble` | garbling and evaluation of a stored gate list |
 | `stream` | the planned streaming garbler: garble, evaluate and check gate by gate in live-wire memory |
 | `tests/binary_whir.rs` | real WHIR proofs; `tests/keccak_stark.rs` real Keccak-f STARK proofs |
