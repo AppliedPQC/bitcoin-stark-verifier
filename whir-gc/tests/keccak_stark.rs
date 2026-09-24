@@ -6,7 +6,14 @@
 //! challenger logs every byte, so the domain-separator seeds can be read off
 //! the run and the reference's transcript compared with Plonky3's op for op.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// The circuit tests hold gigabytes; one at a time.
+static HEAVY: Mutex<()> = Mutex::new(());
+
+fn heavy() -> MutexGuard<'static, ()> {
+    HEAVY.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 use p3_air::{AirLayout, BaseAir, get_symbolic_constraints};
 use p3_binary_field::{BinaryChallenger, BinaryField2, BinaryField128, TowerLevel};
@@ -624,6 +631,7 @@ fn build_full<T: ValuedBuilder>(b: &mut T, inp: &Inputs, honest: &Inputs) -> (ci
 }
 
 fn streamed_case(log_height: usize) {
+    let _heavy = heavy();
     let p = params(log_height);
     let run = prove_and_log(&p);
     let inp = inputs(&p, &run);

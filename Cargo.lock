@@ -2136,6 +2136,7 @@ dependencies = [
  "p3-sumcheck",
  "p3-symmetric",
  "p3-whir",
+ "poseidon2",
  "postcard",
  "rand 0.10.2",
  "rand 0.9.5",

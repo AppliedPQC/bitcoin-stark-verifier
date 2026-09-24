@@ -23,7 +23,14 @@ use p3_whir::pcs::proof::QueryOpenings;
 use p3_whir::{WhirConfig, WhirProver};
 use rand010::SeedableRng;
 use rand010::rngs::SmallRng;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+/// The stored-gate and streaming tests each hold gigabytes; one at a time.
+static HEAVY: Mutex<()> = Mutex::new(());
+
+fn heavy() -> MutexGuard<'static, ()> {
+    HEAVY.lock().unwrap_or_else(|e| e.into_inner())
+}
 use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 use whir_gc::reference::{self, Sponge};
 
@@ -466,6 +473,7 @@ fn reference_matches_plonky3_on_real_binary_whir_proofs() {
 /// covers it gate for gate without one.
 #[test]
 fn circuit_accepts_real_proofs_and_rejects_a_flipped_bit() {
+    let _heavy = heavy();
     for (num_vars, term_bits) in [(8usize, 60usize), (8, 110)] {
         let run = prove_and_log(num_vars, 3, 4, term_bits, Some(0));
         let (cfg, data) = inputs(&run);
@@ -507,6 +515,7 @@ fn circuit_accepts_real_proofs_and_rejects_a_flipped_bit() {
 /// streaming garbler is the one measured at scale.
 #[test]
 fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
+    let _heavy = heavy();
     for (num_vars, term_bits) in [(8usize, 60usize)] {
         let run = prove_and_log(num_vars, 3, 4, term_bits, Some(0));
         let (cfg, data) = inputs(&run);
@@ -550,6 +559,7 @@ fn garbled_verifier_yields_the_true_label_only_for_a_valid_proof() {
 /// stored build fits.
 #[test]
 fn streaming_garbler_builds_verifies_and_scales() {
+    let _heavy = heavy();
     for (num_vars, rate, term_bits) in [(8usize, 3usize, 110usize), (12, 3, 110)] {
         streaming_case(num_vars, rate, 4, term_bits, Some(0));
         streaming_case(num_vars, rate, 4, term_bits, None);
