@@ -13,7 +13,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    # PRs stacked on an unmerged branch are checked too.
+    branches: [main, test/paper-faithful-combination]
   schedule:
     # Monday morning, so drift against Plonky3 is noticed at the start of a week
     # rather than mid-review.
