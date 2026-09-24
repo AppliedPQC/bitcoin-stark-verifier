@@ -44,7 +44,7 @@ p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2
 # GOAT's garbler and circuit API (BitVM's `garbled-snark-verifier`, modified).
 # `_blake3` makes Blake3 the garbling PRF; with no feature the crate's `hash`
 # returns zeros, and AES is not an option here.
-garbled-snark-verifier = { git = "https://github.com/GOATNetwork/bitvm-gc", rev = "8415920", features = ["_blake3"] }
+garbled-snark-verifier = { git = "https://github.com/GOATNetwork/bitvm-gc", rev = "10083d4", features = ["_blake3"] }
 rand = "0.9.1"
 rand_chacha = "0.9.0"
 # Plonky3 pins rand 0.10, which has a different rand_core than the 0.9 the rest
