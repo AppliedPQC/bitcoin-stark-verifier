@@ -38,10 +38,7 @@
 //! gate yields. Per-slot storage is in fixed chunks, since a `Vec` of 10^8
 //! labels doubles into twice its size when it grows.
 
-use garbled_snark_verifier::circuits::sect233k1::builder::{
-    CircuitAdapter, CircuitTrait, CustomGateParams, CustomGateType, GateCounts, GateOperation, Template,
-};
-use garbled_snark_verifier::core::s::S;
+use crate::gates::{CircuitAdapter, CircuitTrait, GateCounts, S, random_bytes};
 
 /// A builder that learns each input wire's value as the wire is allocated.
 pub trait ValuedBuilder: CircuitTrait {
@@ -97,19 +94,7 @@ impl<T: Copy> core::ops::IndexMut<usize> for Chunked<T> {
 }
 
 fn zero_counts() -> GateCounts {
-    GateCounts { direct_and: 0, direct_xor: 0, direct_or: 0, custom: 0, custom_and: 0, custom_xor: 0, custom_or: 0 }
-}
-
-fn copy_counts(c: &GateCounts) -> GateCounts {
-    GateCounts {
-        direct_and: c.direct_and,
-        direct_xor: c.direct_xor,
-        direct_or: c.direct_or,
-        custom: 0,
-        custom_and: 0,
-        custom_xor: 0,
-        custom_or: 0,
-    }
+    GateCounts::default()
 }
 
 /// A wire used this often is never released.
@@ -120,12 +105,11 @@ const PINNED: u8 = u8::MAX;
 pub struct Plan {
     uses: Chunked<u8>,
     counts: GateCounts,
-    empty: Vec<GateOperation>,
 }
 
 impl Plan {
     pub fn new() -> Self {
-        let mut me = Self { uses: Chunked::new(), counts: zero_counts(), empty: Vec::new() };
+        let mut me = Self { uses: Chunked::new(), counts: zero_counts() };
         me.uses.push(PINNED);
         me.uses.push(PINNED);
         me
@@ -155,10 +139,6 @@ impl Default for Plan {
 impl CircuitTrait for Plan {
     fn fresh_one(&mut self) -> usize {
         self.alloc()
-    }
-
-    fn fresh<const N: usize>(&mut self) -> [usize; N] {
-        core::array::from_fn(|_| self.fresh_one())
     }
 
     fn zero(&mut self) -> usize {
@@ -223,29 +203,17 @@ impl CircuitTrait for Plan {
         self.alloc()
     }
 
-    fn push_custom_gate(&mut self, _params: CustomGateParams, _new_wire_idx: usize) {
-        unimplemented!("custom gates are not used")
-    }
 
-    fn get_gates(&self) -> &Vec<GateOperation> {
-        &self.empty
-    }
 
     fn gate_counts(&self) -> GateCounts {
-        copy_counts(&self.counts)
+        self.counts
     }
 
     fn next_wire(&self) -> usize {
         self.uses.len()
     }
 
-    fn init_circuit_config_for_custom_gate(&mut self, _templ_type: CustomGateType) -> &Template {
-        unimplemented!("custom gates are not used")
-    }
 
-    fn get_template(&self, _templ_type: CustomGateType) -> Option<&Template> {
-        None
-    }
 }
 
 impl ValuedBuilder for Plan {
@@ -271,7 +239,6 @@ pub struct Streaming {
     ciphertexts: Vec<S>,
     keep_ciphertexts: bool,
     non_free: usize,
-    empty: Vec<GateOperation>,
 }
 
 impl Streaming {
@@ -288,7 +255,7 @@ impl Streaming {
     fn with(plan: Option<Chunked<u8>>, keep_ciphertexts: bool) -> Self {
         let mut me = Self {
             delta: S::random(),
-            seed: garbled_snark_verifier::circuits::bn254::utils::random_seed::<32>(),
+            seed: random_bytes::<32>(),
             label0: Chunked::new(),
             value: Chunked::new(),
             remaining: Chunked::new(),
@@ -300,7 +267,6 @@ impl Streaming {
             ciphertexts: Vec::new(),
             keep_ciphertexts,
             non_free: 0,
-            empty: Vec::new(),
         };
         // Wires 0 and 1 are the constants, as `CircuitAdapter` numbers them.
         let zero = me.alloc(false);
@@ -369,15 +335,15 @@ impl Streaming {
     /// held input labels and require the held output label.
     fn non_free(&mut self, x: usize, y: usize, is_or: bool) -> usize {
         let gid = u32::try_from(self.non_free).expect("gate ids fit in u32");
-        let h0 = self.label0[x].hash_ext(gid, None);
-        let h1 = (self.label0[x] ^ self.delta).hash_ext(gid, None);
+        let h0 = self.label0[x].hash_ext(gid);
+        let h1 = (self.label0[x] ^ self.delta).hash_ext(gid);
         let (c0, ct, v) = if is_or {
             (h1 ^ self.delta, h1 ^ h0 ^ (self.label0[y] ^ self.delta), self.value[x] | self.value[y])
         } else {
             (h0, h1 ^ h0 ^ self.label0[y], self.value[x] & self.value[y])
         };
         // The evaluator, holding the labels of the values.
-        let h = self.held(x).hash_ext(gid, None);
+        let h = self.held(x).hash_ext(gid);
         let evaluated = if self.value[x] != is_or { h ^ ct ^ self.held(y) } else { h };
         self.consume(x);
         self.consume(y);
@@ -424,10 +390,6 @@ impl Streaming {
 impl CircuitTrait for Streaming {
     fn fresh_one(&mut self) -> usize {
         self.alloc(false)
-    }
-
-    fn fresh<const N: usize>(&mut self) -> [usize; N] {
-        core::array::from_fn(|_| self.fresh_one())
     }
 
     fn zero(&mut self) -> usize {
@@ -490,29 +452,17 @@ impl CircuitTrait for Streaming {
         self.non_free(x, y, false)
     }
 
-    fn push_custom_gate(&mut self, _params: CustomGateParams, _new_wire_idx: usize) {
-        unimplemented!("custom gates are not used")
-    }
 
-    fn get_gates(&self) -> &Vec<GateOperation> {
-        &self.empty
-    }
 
     fn gate_counts(&self) -> GateCounts {
-        copy_counts(&self.counts)
+        self.counts
     }
 
     fn next_wire(&self) -> usize {
         self.label0.len()
     }
 
-    fn init_circuit_config_for_custom_gate(&mut self, _templ_type: CustomGateType) -> &Template {
-        unimplemented!("custom gates are not used")
-    }
 
-    fn get_template(&self, _templ_type: CustomGateType) -> Option<&Template> {
-        None
-    }
 }
 
 impl ValuedBuilder for Streaming {

@@ -8,6 +8,7 @@
 pub mod blake3;
 pub mod circuit;
 pub mod garble;
+pub mod gates;
 pub mod koala;
 pub mod pruned;
 pub mod reference;

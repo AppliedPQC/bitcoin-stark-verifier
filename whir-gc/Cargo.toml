@@ -3,11 +3,11 @@ name = "whir-gc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A WHIR verifier over the binary tower fields as a boolean circuit, on bitvm-gc's circuit API"
+description = "A binary-field STARK verifier as a boolean circuit, garbled"
 
 [dependencies]
 blake3 = "1"
-garbled-snark-verifier.workspace = true
+rand.workspace = true
 p3-air.workspace = true
 poseidon2 = { path = "../poseidon2" }
 p3-binary-field.workspace = true

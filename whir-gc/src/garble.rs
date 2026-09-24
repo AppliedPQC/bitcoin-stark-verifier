@@ -26,8 +26,7 @@
 //! output's true label would be free to compute. A deployment needs a secret
 //! random `Δ` per garbling, which is what this does.
 
-use garbled_snark_verifier::circuits::sect233k1::builder::{CircuitAdapter, CircuitTrait, GateOperation, Operation};
-use garbled_snark_verifier::core::s::S;
+use crate::gates::{CircuitAdapter, CircuitTrait, Operation, S};
 
 /// A garbled circuit: what the garbler hands the evaluator, and what it keeps.
 pub struct Garbled {
@@ -66,22 +65,20 @@ pub fn garble(circuit: &CircuitAdapter, inputs: usize, output: usize) -> Garbled
     let mut ciphertexts = Vec::new();
     for (gid, g) in circuit.get_gates().iter().enumerate() {
         let gid = u32::try_from(gid).expect("gate ids fit in u32");
-        let GateOperation::Base(op) = g else { panic!("custom gates are not used") };
-        match *op {
+        match *g {
             Operation::Add(d, x, y) => label0[d] = label0[x] ^ label0[y],
             Operation::Mul(d, x, y) => {
-                let h0 = label0[x].hash_ext(gid, None);
-                let h1 = (label0[x] ^ delta).hash_ext(gid, None);
+                let h0 = label0[x].hash_ext(gid);
+                let h1 = (label0[x] ^ delta).hash_ext(gid);
                 label0[d] = h0;
                 ciphertexts.push(h1 ^ h0 ^ label0[y]);
             }
             Operation::Or(d, x, y) => {
-                let h0 = label0[x].hash_ext(gid, None);
-                let h1 = (label0[x] ^ delta).hash_ext(gid, None);
+                let h0 = label0[x].hash_ext(gid);
+                let h1 = (label0[x] ^ delta).hash_ext(gid);
                 label0[d] = h1 ^ delta;
                 ciphertexts.push(h1 ^ h0 ^ (label0[y] ^ delta));
             }
-            Operation::Const(..) => panic!("constant gates are not used"),
         }
     }
     let output0 = label0[output];
@@ -112,8 +109,7 @@ pub fn evaluate(circuit: &CircuitAdapter, garbled: &Garbled, witness: &[bool]) -
     let mut next_ct = 0;
     for (gid, g) in circuit.get_gates().iter().enumerate() {
         let gid = u32::try_from(gid).expect("gate ids fit in u32");
-        let GateOperation::Base(op) = g else { panic!("custom gates are not used") };
-        match *op {
+        match *g {
             Operation::Add(d, x, y) => {
                 value[d] = value[x] ^ value[y];
                 label[d] = label[x] ^ label[y];
@@ -122,17 +118,16 @@ pub fn evaluate(circuit: &CircuitAdapter, garbled: &Garbled, witness: &[bool]) -
                 let ct = garbled.ciphertexts[next_ct];
                 next_ct += 1;
                 value[d] = value[x] & value[y];
-                let h = label[x].hash_ext(gid, None);
+                let h = label[x].hash_ext(gid);
                 label[d] = if value[x] { h ^ ct ^ label[y] } else { h };
             }
             Operation::Or(d, x, y) => {
                 let ct = garbled.ciphertexts[next_ct];
                 next_ct += 1;
                 value[d] = value[x] | value[y];
-                let h = label[x].hash_ext(gid, None);
+                let h = label[x].hash_ext(gid);
                 label[d] = if value[x] { h } else { h ^ ct ^ label[y] };
             }
-            Operation::Const(..) => panic!("constant gates are not used"),
         }
     }
     assert_eq!(next_ct, garbled.ciphertexts.len(), "every ciphertext consumed");

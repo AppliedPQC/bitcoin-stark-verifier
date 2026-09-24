@@ -12,10 +12,15 @@ In one line: a full verifier for a 2^16-row, 1,625-column Keccak-f trace at
 garble or evaluate on one core, against 2.72 × 10^9 gates for `bitvm-gc`'s
 Groth16 verifier. The tables below say where every gate goes.
 
-Built on the circuit API of GOAT's [`bitvm-gc`](https://github.com/GOATNetwork/bitvm-gc)
-(`garbled-snark-verifier`, a modification of BitVM's), with Blake3 as the
-garbling PRF (`_blake3`); the proofs are Plonky3's, over `BinaryField128` on
-the additive Cantor domain with Blake3 commitments.
+The circuit API (`gates`) is that of GOAT's
+[`bitvm-gc`](https://github.com/GOATNetwork/bitvm-gc) (`garbled-snark-verifier`,
+a modification of BitVM's), reimplemented here in one small module with the
+same constant folding, the same gate formulas and the same label PRF
+(`Blake3(label ‖ gid)`, 16 bytes), so that every count is what a `bitvm-gc`
+build reports and a garbling made here is one its proof-of-garbling guest
+accepts; the crate itself no longer depends on `bitvm-gc`. The proofs are
+Plonky3's, over `BinaryField128` on the additive Cantor domain with Blake3
+commitments.
 
 ## What is here, measured
 
@@ -313,6 +318,7 @@ verifier should be binary-field native.
 | `circuit` | the WHIR verifier on wires, with a prefix hook and a gate profile |
 | `stark`, `stark_circuit` | the multi-STARK layers (zerocheck, column batching, bit ring switch) as reference and as wires |
 | `koala` | KoalaBear and Poseidon2 on wires, for the comparison above |
+| `gates` | the circuit interface, the stored-gate builder and the 16-byte label, `bitvm-gc`-compatible |
 | `garble` | garbling and evaluation of a stored gate list |
 | `stream` | the planned streaming garbler: garble, evaluate and check gate by gate in live-wire memory |
 | `tests/binary_whir.rs` | real WHIR proofs; `tests/keccak_stark.rs` real Keccak-f STARK proofs |

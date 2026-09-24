@@ -17,7 +17,7 @@
 //! a shuffle and XORs. The only AND gates are the base-field products, three
 //! per level, so a `2^k`-bit multiplication is `3^k` ANDs: 2,187 at 128 bits.
 
-use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
+use crate::gates::CircuitTrait;
 
 /// Fresh input wires for a `bits`-bit element, bit 0 first.
 pub fn fresh<T: CircuitTrait>(b: &mut T, bits: usize) -> Vec<usize> {
@@ -100,7 +100,7 @@ pub fn read(wires: &[bool], elem: &[usize]) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use garbled_snark_verifier::circuits::sect233k1::builder::CircuitAdapter;
+    use crate::gates::CircuitAdapter;
     use p3_binary_field::{
         BinaryField128, BinaryField16, BinaryField2, BinaryField32, BinaryField4, BinaryField64,
         BinaryField8, Gf2, TowerLevel,
@@ -129,7 +129,7 @@ mod tests {
             let sq = square(&mut bld, &x);
             let al = mul_alpha(&mut bld, &x);
             let counts = bld.gate_counts();
-            ands = counts.direct_and + counts.custom_and;
+            ands = counts.direct_and;
 
             let mut witness = witness_bits(a, bits);
             witness.extend(witness_bits(b_, bits));
