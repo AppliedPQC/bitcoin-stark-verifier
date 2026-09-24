@@ -48,23 +48,26 @@ live wire. Rate 1/32, folding 4, terminal security 110, Blake3 everywhere:
 | 2^12 rows (163 Keccak-f) | 16 | 77,736,394 | 1,243 MB | 43 s | 616 MB | 874,240 bits | 75 s |
 | **2^16 rows (2,621 Keccak-f)** | 20 | **88,680,747** | **1,418 MB** | 61 s | 1.5 GB | 997,760 bits | 44 min |
 
-Each accepts its proof and rejects it with an opened value changed. The
-2^18 case is not yet measured (about +5M gates per two variables from the
+Each accepts its proof; at 2^5 and 2^8 the test also rejects it with an
+opened value changed. The 2^18 case is not yet measured (about +5M gates per two variables from the
 slope above, so ~95M); it is the `#[ignore]`d test, a few hours of proving
 on one core with a 6 GB peak.
 
 ## Running
 
 ```
-(ulimit -v 7340032; cargo test -p whir-gc --release --test keccak_stark -- --nocapture)
-(ulimit -v 10485760; WHIR_GC_LOG_HEIGHT=18 cargo test -p whir-gc --release --test keccak_stark \
-    full_verifier_circuit_on_the_2_18 -- --ignored --nocapture)
+LIMIT="systemd-run --user --scope -q -p MemoryMax=32G -p MemorySwapMax=0 taskset -c 0-7"
+RAYON_NUM_THREADS=8 $LIMIT cargo test -p whir-gc --release --test keccak_stark -- --nocapture
+WHIR_GC_LOG_HEIGHT=18 RAYON_NUM_THREADS=8 $LIMIT cargo test -p whir-gc --release --test keccak_stark \
+    full_verifier_circuit_on_the_2_18 -- --ignored --nocapture
 ```
 
-Run under a cap, so a regression kills the test and not the machine.
+Every test runs in 32 GB of RAM on 8 cores, so a regression kills the test
+and not the machine.
 `reference_verifies_real_keccak_stark_proofs` checks the reference against
 Plonky3's verifier, `full_verifier_circuit_accepts_real_keccak_stark_proofs`
-garbles the circuit at 2^5 to 2^16 rows, and
+garbles the circuit at 2^5 and 2^8 rows (the ignored test takes other
+heights from `WHIR_GC_LOG_HEIGHT`, as for the 2^12 and 2^16 rows), and
 `security_of_the_measured_configurations` prints Plonky3's soundness report.
 
 ## Where the gates go
