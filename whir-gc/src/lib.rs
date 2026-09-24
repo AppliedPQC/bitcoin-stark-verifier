@@ -5,7 +5,6 @@
 //! the gadgets against `p3-binary-field`'s arithmetic, and the verifier, once
 //! it exists, against proofs from Plonky3's prover.
 
-pub mod blake3;
 pub mod circuit;
 pub mod garble;
 pub mod koala;
@@ -13,5 +12,4 @@ pub mod pruned;
 pub mod reference;
 pub mod stark;
 pub mod stark_circuit;
-pub mod stream;
 pub mod tower;

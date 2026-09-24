@@ -24,10 +24,10 @@
 use garbled_snark_verifier::circuits::sect233k1::builder::{CircuitAdapter, CircuitTrait, GateCounts};
 use p3_binary_field::TowerLevel;
 
-use crate::blake3;
+use garbled_snark_verifier::circuits::sect233k1::blake3_ckt as blake3;
 use crate::pruned;
 use crate::reference::{self, Config, Data, F};
-use crate::stream::ValuedBuilder;
+use garbled_snark_verifier::circuits::sect233k1::stream::ValuedBuilder;
 use crate::tower;
 
 pub type Byte = [usize; 8];

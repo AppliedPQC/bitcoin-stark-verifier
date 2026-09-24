@@ -23,14 +23,13 @@ the additive Cantor domain with Blake3 commitments.
 | --- | ---: | --- |
 | `tower::mul`, `GF(2^128)` | **2,187** (`3^7`) | `p3-binary-field`, every level, random elements |
 | `tower::square`, `tower::mul_alpha` | 0 | same |
-| `blake3::hash_bytes`, 64 bytes (a Merkle compression) | **10,281** | the `blake3` crate |
-| `blake3::hash_bytes`, 256 bytes (a leaf row of 16 elements) | **41,511** | same |
-| `blake3::hash_bytes`, 1,072 bytes (two chunks: a flush with the 64-coefficient final polynomial) | 186,125 | same |
+| `blake3_ckt::hash_bytes`, 64 bytes (a Merkle compression) | **10,281** | the `blake3` crate |
+| `blake3_ckt::hash_bytes`, 256 bytes (a leaf row of 16 elements) | **41,511** | same |
+| `blake3_ckt::hash_bytes`, 1,072 bytes (two chunks: a flush with the 64-coefficient final polynomial) | 186,125 | same |
 
 XOR is free under half-gates, so only AND gates are counted. The Blake3
-gadget is `bitvm-gc`'s (`circuits/sect233k1/blake3_ckt.rs`, MIT OR
-Apache-2.0, vendored because it is `pub(crate)` there) with its 32-bit adder
-rewritten to one AND per bit (`maj(a, b, c) = c ⊕ ((a⊕c)·(b⊕c))`), which
+gadget is `bitvm-gc`'s (`circuits/sect233k1/blake3_ckt.rs`), made public
+upstream with its 32-bit adder rewritten to one AND per bit (`maj(a, b, c) = c ⊕ ((a⊕c)·(b⊕c))`), which
 halved it from 20,657, and with the reference implementation's tree mode
 added (chunk chaining values on a stack, parent nodes, the root at the top),
 since the transcript of the 2^18 schedule absorbs more than one chunk between
@@ -86,7 +85,7 @@ transcript), the final polynomial.
 garbled by `bitvm-gc`'s own `gate_garbled_with_delta` (privacy-free: one
 16-byte ciphertext per AND/OR, free XOR, `H(l) = Blake3(l ‖ gid)`), without
 materialising a `Wire` per wire -- and `evaluate` walks it with the proof's
-values, which is the BitVM3 setting: the proof is public, and the point is
+values through `bitvm-gc`'s `gate_evaluate`, which is the BitVM3 setting: the proof is public, and the point is
 that the output's *true* label comes out only of an accepting evaluation.
 Single thread, on the stored 8- and 12-variable circuits:
 
@@ -96,18 +95,20 @@ Single thread, on the stored 8- and 12-variable circuits:
 | 12 variables, 68 + 33 queries, 21.98M non-free gates | **351 MB** | 6.9 s | 7.4 s |
 
 Each valid proof yields the true output label; with one input bit flipped,
-the false one. Upstream's `DELTA` is the fixed public constant `S::one()`
-(its own `FIXME`), under which any label yields its complement; `garble`
-draws `Δ` at random, as a deployment must.
+the false one. `garble` draws `Δ` at random, as a deployment must, never
+upstream's default `NON_CAC_DELTA` (the public `S::one()`, under which any
+label yields its complement).
 
 ## Streamed, measured: the 2^18 schedule
 
 A stored gate list is the limit: the 12-variable circuit's is 10 GB, and
-garbling it needs a label per wire on top. `stream::Streaming` is a
+garbling it needs a label per wire on top. `bitvm-gc`'s
+`circuits/sect233k1/stream.rs` (written for this crate, upstreamed with a
+secret random `Δ` per garbling) has `Streaming`, a
 `CircuitTrait` backend that garbles, evaluates and checks each gate as the
 builder emits it (the evaluator's formula on the held labels must give the
 held output label), with the same folding as `CircuitAdapter` so that the two
-emit the same circuit, gate for gate. `stream::Plan` is a first pass of the
+emit the same circuit, gate for gate, and `Plan`, a first pass of the
 same builder that records each wire's number of uses (one byte per wire);
 the garbling pass then releases a wire's slot after its last use, so what is
 held is the live wires, not the circuit. Single thread, peak RSS of the
@@ -307,14 +308,12 @@ verifier should be binary-field native.
 | module | what |
 | --- | --- |
 | `tower` | `GF(2^128)` tower arithmetic on wires, level by level against `p3-binary-field` |
-| `blake3` | the Blake3 gadget, any input length |
 | `pruned` | expansion of Plonky3's pruned Merkle proofs into per-query paths |
 | `reference` | the WHIR verifier on field elements, op for op with Plonky3 |
 | `circuit` | the WHIR verifier on wires, with a prefix hook and a gate profile |
 | `stark`, `stark_circuit` | the multi-STARK layers (zerocheck, column batching, bit ring switch) as reference and as wires |
 | `koala` | KoalaBear and Poseidon2 on wires, for the comparison above |
 | `garble` | garbling and evaluation of a stored gate list |
-| `stream` | the planned streaming garbler: garble, evaluate and check gate by gate in live-wire memory |
 | `tests/binary_whir.rs` | real WHIR proofs; `tests/keccak_stark.rs` real Keccak-f STARK proofs |
 
 ## Plan

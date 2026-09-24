@@ -749,7 +749,7 @@ dependencies = [
 [[package]]
 name = "garbled-snark-verifier"
 version = "0.1.0"
-source = "git+https://github.com/GOATNetwork/bitvm-gc?rev=bc3df6d#bc3df6dff79418069f04c82281e90829e43b862e"
+source = "git+https://github.com/GOATNetwork/bitvm-gc?rev=ac36788#ac3678830d15d7d5be471e1fc7d43f07de039faf"
 dependencies = [
  "ark-bn254",
  "ark-crypto-primitives",

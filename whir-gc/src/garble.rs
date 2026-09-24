@@ -5,7 +5,7 @@
 //! sub-circuit splits, but tens of gigabytes for a verifier of 10^8 wires. This
 //! walks the gate list once with one 16-byte label per wire, garbling each
 //! gate through `garbled_snark_verifier::core::gate::gate_garbled_with_delta`
-//! and evaluating with the formulas of its `Gate::e`:
+//! and evaluating through its `gate_evaluate`:
 //!
 //! - **XOR is free**: `c0 = a0 ⊕ b0`, and the evaluator XORs its labels.
 //! - **AND**, one ciphertext: `c0 = H(a0)`, `ct = H(a1) ⊕ H(a0) ⊕ b0` with
@@ -20,14 +20,12 @@
 //! public and the point is that the *true* label of the output wire can be
 //! obtained only by an accepting evaluation.
 //!
-//! One difference from upstream, on purpose: `Δ` is drawn at random here.
-//! Upstream's `DELTA` is the fixed public constant `S::one()` (its own
-//! `FIXME`), and with a public `Δ` every label yields its complement, so the
-//! output's true label would be free to compute. A deployment needs a secret
-//! random `Δ` per garbling, which is what this does.
+//! `Δ` is drawn at random here, never upstream's default `NON_CAC_DELTA`, the
+//! public constant `S::one()`: with a public `Δ` every label yields its
+//! complement, so the output's true label would be free to compute.
 
 use garbled_snark_verifier::circuits::sect233k1::builder::{CircuitAdapter, CircuitTrait, GateOperation, Operation};
-use garbled_snark_verifier::core::gate::{GateType, gate_garbled_with_delta};
+use garbled_snark_verifier::core::gate::{GateType, gate_evaluate, gate_garbled_with_delta};
 use garbled_snark_verifier::core::s::S;
 
 /// A garbled circuit: what the garbler hands the evaluator, and what it keeps.
@@ -113,19 +111,13 @@ pub fn evaluate(circuit: &CircuitAdapter, garbled: &Garbled, witness: &[bool]) -
                 value[d] = value[x] ^ value[y];
                 label[d] = label[x] ^ label[y];
             }
-            Operation::Mul(d, x, y) => {
+            Operation::Mul(d, x, y) | Operation::Or(d, x, y) => {
+                let is_or = matches!(*op, Operation::Or(..));
+                let gate_type = if is_or { GateType::Or } else { GateType::And };
                 let ct = garbled.ciphertexts[next_ct];
                 next_ct += 1;
-                value[d] = value[x] & value[y];
-                let h = label[x].hash_ext(gid, None);
-                label[d] = if value[x] { h ^ ct ^ label[y] } else { h };
-            }
-            Operation::Or(d, x, y) => {
-                let ct = garbled.ciphertexts[next_ct];
-                next_ct += 1;
-                value[d] = value[x] | value[y];
-                let h = label[x].hash_ext(gid, None);
-                label[d] = if value[x] { h } else { h ^ ct ^ label[y] };
+                value[d] = if is_or { value[x] | value[y] } else { value[x] & value[y] };
+                label[d] = gate_evaluate(gate_type, value[x], label[x], label[y], Some(ct), gid, None);
             }
             Operation::Const(..) => panic!("constant gates are not used"),
         }

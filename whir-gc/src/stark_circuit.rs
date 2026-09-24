@@ -28,7 +28,7 @@ use crate::circuit::{
 };
 use crate::reference::F;
 use crate::stark::{ABSORBED, Air, Config, DIM, Data, node};
-use crate::stream::ValuedBuilder;
+use garbled_snark_verifier::circuits::sect233k1::stream::ValuedBuilder;
 use crate::tower;
 
 /// The proof's messages as input wires, in transcript order.

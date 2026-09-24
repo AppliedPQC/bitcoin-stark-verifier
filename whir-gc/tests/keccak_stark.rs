@@ -39,7 +39,7 @@ use whir_gc::circuit;
 use whir_gc::reference::{self, Sponge};
 use whir_gc::stark;
 use whir_gc::stark_circuit;
-use whir_gc::stream::{Plan, Streaming, ValuedBuilder};
+use garbled_snark_verifier::circuits::sect233k1::stream::{Plan, Streaming, ValuedBuilder};
 
 type F = BinaryField128;
 type Hash = SerializingHasher<Blake3>;

@@ -582,7 +582,7 @@ fn streaming_garbler_on_the_2_18_schedule() {
 /// One proof through plan and streamed garbling, with a single root
 /// (`Some(0)`) or Plonky3's recommended Merkle cap (`None`).
 fn streaming_case(num_vars: usize, rate: usize, folding: usize, term_bits: usize, cap_height: Option<usize>) {
-    use whir_gc::stream::{Plan, Streaming};
+    use garbled_snark_verifier::circuits::sect233k1::stream::{Plan, Streaming};
     {
         let t = std::time::Instant::now();
         let run = prove_and_log(num_vars, rate, folding, term_bits, cap_height);
