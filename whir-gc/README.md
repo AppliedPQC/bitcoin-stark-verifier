@@ -7,8 +7,8 @@ circuit, to be garbled: the on-chain cost of a garbled-circuit dispute
 hash-based verifier garbled instead of a Groth16 one keeps the whole
 construction post-quantum.
 
-In one line: a full verifier for a 2^16-row, 1,625-column Keccak-f trace at
-104 bits of soundness is 88.7M non-free gates, 1.4 GB garbled, one minute to
+In one line: a full verifier for a 2^18-row, 1,625-column Keccak-f trace at
+104 bits of soundness is 94.1M non-free gates, 1.5 GB garbled, one minute to
 garble or evaluate on one core, against 2.72 × 10^9 gates for `bitvm-gc`'s
 Groth16 verifier.
 
@@ -46,12 +46,13 @@ live wire. Rate 1/32, folding 4, terminal security 110, Blake3 everywhere:
 | 2^5 rows (1 Keccak-f) | 9 | 44,573,121 | 713 MB | 25 s | | 586,240 bits | 0.1 s |
 | 2^8 rows (10 Keccak-f) | 12 | 66,459,859 | 1,063 MB | 37 s | | 743,808 bits | 1.2 s |
 | 2^12 rows (163 Keccak-f) | 16 | 77,736,394 | 1,243 MB | 43 s | 616 MB | 874,240 bits | 75 s |
-| **2^16 rows (2,621 Keccak-f)** | 20 | **88,680,747** | **1,418 MB** | 61 s | 1.5 GB | 997,760 bits | 44 min |
+| 2^16 rows (2,621 Keccak-f) | 20 | 88,680,747 | 1,418 MB | 61 s | 1.5 GB | 997,760 bits | 44 min |
+| **2^18 rows (10,485 Keccak-f)** | 22 | **94,069,548** | **1,505 MB** | 57 s | 6.1 GB | 1,041,024 bits | 87 min on 8 cores |
 
 Each accepts its proof; at 2^5 and 2^8 the test also rejects it with an
-opened value changed. The 2^18 case is not yet measured (about +5M gates per two variables from the
-slope above, so ~95M); it is the `#[ignore]`d test, a few hours of proving
-on one core with a 6 GB peak.
+opened value changed. Proving times are on one core except at 2^18, the
+`#[ignore]`d test, run on 8; its 6.1 GB peak is the prover's, the garbling
+itself holding 2.26M live labels. The 2^18 proof is 140 KiB.
 
 ## Running
 
