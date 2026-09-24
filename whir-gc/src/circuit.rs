@@ -21,7 +21,7 @@
 //! and records the bits a real proof puts on them; [`build`] then yields the
 //! circuit and a witness to run it on.
 
-use crate::gates::{CircuitAdapter, CircuitTrait, GateCounts};
+use garbled_snark_verifier::circuits::sect233k1::builder::{CircuitAdapter, CircuitTrait, GateCounts};
 use p3_binary_field::TowerLevel;
 
 use crate::blake3;

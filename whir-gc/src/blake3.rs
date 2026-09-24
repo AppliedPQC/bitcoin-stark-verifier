@@ -9,7 +9,7 @@
 
 use core::cmp::min;
 
-use crate::gates::CircuitTrait;
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 
 const OUT_LEN: usize = 32;
 const BLOCK_LEN: usize = 64;
@@ -465,7 +465,7 @@ pub fn hash_bytes<T: CircuitTrait>(bld: &mut T, input: &[U8]) -> [U8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gates::CircuitAdapter;
+    use garbled_snark_verifier::circuits::sect233k1::builder::CircuitAdapter;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;
 
@@ -493,8 +493,8 @@ mod tests {
             let wires = bld.eval_gates(&bits_le(&msg));
             assert_eq!(read_bytes(&wires, &out), blake3::hash(&msg).as_bytes().to_vec(), "{n} bytes");
             eprintln!(
-                "blake3 of {n} bytes: {} AND, {} XOR, {} OR",
-                counts.direct_and, counts.direct_xor, counts.direct_or
+                "blake3 of {n} bytes: {} AND, {} XOR, {} OR, {} custom",
+                counts.direct_and, counts.direct_xor, counts.direct_or, counts.custom
             );
         }
     }

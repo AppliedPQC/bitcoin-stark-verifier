@@ -9,7 +9,7 @@
 //! Everything is checked against the `poseidon2` crate's reference, itself
 //! checked against Plonky3.
 
-use crate::gates::CircuitTrait;
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 use poseidon2::constants::{EXTERNAL_FINAL, EXTERNAL_INITIAL, INTERNAL, P, WIDTH};
 
 pub const BITS: usize = 31;
@@ -536,7 +536,7 @@ pub fn ext_mul<T: CircuitTrait>(b: &mut T, x: &Ext, y: &Ext) -> Ext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gates::CircuitAdapter;
+    use garbled_snark_verifier::circuits::sect233k1::builder::CircuitAdapter;
     use poseidon2::reference as r;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha20Rng;

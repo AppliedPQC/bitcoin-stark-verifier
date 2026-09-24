@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 
-use crate::gates::CircuitTrait;
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 use p3_air::{BaseEntry, BaseLeaf, SymbolicExpr, SymbolicExpression};
 use p3_binary_field::TowerLevel;
 use p3_field::{Field, PrimeCharacteristicRing};

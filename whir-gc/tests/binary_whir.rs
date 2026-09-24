@@ -31,7 +31,7 @@ static HEAVY: Mutex<()> = Mutex::new(());
 fn heavy() -> MutexGuard<'static, ()> {
     HEAVY.lock().unwrap_or_else(|e| e.into_inner())
 }
-use whir_gc::gates::CircuitTrait;
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 use whir_gc::reference::{self, Sponge};
 
 type F = BinaryField128;

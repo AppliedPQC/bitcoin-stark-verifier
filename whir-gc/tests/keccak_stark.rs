@@ -34,7 +34,7 @@ use p3_sumcheck::layout::{Table, plan_stacked_layout};
 use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
 use p3_whir::pcs::proof::QueryOpenings;
 use p3_whir::{WhirConfig, WhirProver};
-use whir_gc::gates::CircuitTrait;
+use garbled_snark_verifier::circuits::sect233k1::builder::CircuitTrait;
 use whir_gc::circuit;
 use whir_gc::reference::{self, Sponge};
 use whir_gc::stark;
