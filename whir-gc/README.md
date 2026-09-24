@@ -1,9 +1,16 @@
 # whir-gc
 
-A WHIR verifier over the binary tower fields as a boolean circuit, to be
-garbled: the on-chain cost of a garbled-circuit dispute (BitVM3 and its
-successors) does not depend on the verifier's size, and a hash-based verifier
-garbled instead of a Groth16 one keeps the whole construction post-quantum.
+A binary-field STARK verifier -- Plonky3's `p3-multi-stark` over the WHIR
+polynomial commitment, all over the `GF(2^128)` tower -- as a boolean
+circuit, to be garbled: the on-chain cost of a garbled-circuit dispute
+(BitVM3 and its successors) does not depend on the verifier's size, and a
+hash-based verifier garbled instead of a Groth16 one keeps the whole
+construction post-quantum.
+
+In one line: a full verifier for a 2^16-row, 1,625-column Keccak-f trace at
+104 bits of soundness is 88.7M non-free gates, 1.4 GB garbled, one minute to
+garble or evaluate on one core, against 2.72 × 10^9 gates for `bitvm-gc`'s
+Groth16 verifier. The tables below say where every gate goes.
 
 Built on the circuit API of GOAT's [`bitvm-gc`](https://github.com/GOATNetwork/bitvm-gc)
 (`garbled-snark-verifier`, a modification of BitVM's), with Blake3 as the
@@ -201,36 +208,79 @@ has the reference replay Plonky3's verifier byte for byte, then streams the
 full circuit through the garbler. Rate 1/32, folding 4, terminal security
 110, Blake3 everywhere:
 
-| trace | packed variables | non-free gates | garbled | garble | inputs |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 2^5 rows (1 Keccak-f) | 9 | 44,573,121 | 713 MB | 25 s | 586,240 bits |
-| 2^8 rows (10 Keccak-f) | 12 | 66,459,859 | 1,063 MB | 37 s | 743,808 bits |
-| 2^12 rows (163 Keccak-f) | 16 | 77,736,394 | 1,243 MB | 43 s | 874,240 bits |
+| trace | packed variables | non-free gates | garbled | garble | peak RSS | inputs | proving |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2^5 rows (1 Keccak-f) | 9 | 44,573,121 | 713 MB | 25 s | | 586,240 bits | 0.1 s |
+| 2^8 rows (10 Keccak-f) | 12 | 66,459,859 | 1,063 MB | 37 s | | 743,808 bits | 1.2 s |
+| 2^12 rows (163 Keccak-f) | 16 | 77,736,394 | 1,243 MB | 43 s | 616 MB | 874,240 bits | 75 s |
+| **2^16 rows (2,621 Keccak-f)** | 20 | **88,680,747** | **1,418 MB** | 61 s | 1.5 GB | 997,760 bits | 44 min |
 
-Each accepts its proof and rejects it with an opened value changed. Where the
-2^12 circuit's gates go:
+Each accepts its proof and rejects it with an opened value changed; the
+2^18 run is in progress (`WHIR_GC_LOG_HEIGHT=18`, about +5M gates per two
+variables, so ~95M). Where the 2^16 circuit's gates go:
 
 | phase | non-free gates | share |
 | --- | ---: | ---: |
-| ring switch closing (equality, carry and last elements: 256 multiplications per coordinate) | 24,686,734 | 31.8% |
-| column combination (a 2^11 eq table and two 1,625-term dot products) | 11,582,352 | 14.9% |
-| AIR constraints (1,650 constraints, Horner under alpha) | 10,709,866 | 13.8% |
-| STARK transcript (absorbing 3,250 opened values and the tensors) | 10,438,166 | 13.4% |
-| WHIR: paths, leaves, folds, weights, transcript | 18,500,000 | 23.8% |
-| zerocheck sumcheck, ring switch statement, closing checks | 1,800,000 | 2.3% |
+| ring switch closing (equality, carry and last elements: 256 multiplications per coordinate) | 29,318,218 | 33.1% |
+| WHIR Merkle paths | 13,048,737 | 14.7% |
+| column combination (a 2^11 eq table and two 1,625-term dot products) | 11,582,352 | 13.1% |
+| AIR constraints (1,650 constraints, Horner under alpha) | 10,727,362 | 12.1% |
+| STARK transcript (absorbing 3,250 opened values and the tensors) | 10,500,208 | 11.8% |
+| WHIR leaves, folds, weights, transcript, rest | 11,500,000 | 13.0% |
+| zerocheck sumcheck, ring switch statement, closing checks | 2,000,000 | 2.2% |
 
-The column count sets three of the four big items: the STARK transcript, the
+The column count sets three of the big items: the STARK transcript, the
 combination and the constraints all grow with it. The ring switch closing
 grows with the packed variables (256 multiplications each) plus a fixed
-11 × 512 for the column selector.
+11 × 512 for the column selector, and is the first place to optimise.
+
+## Security
+
+Plonky3's own assessment of the configurations above
+(`security_of_the_measured_configurations`), every term a proven bound in the
+Johnson list-decoding regime, nothing unassessed:
+
+| trace | 2^5 | 2^8 | 2^12 | 2^16 | 2^18 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| composed soundness, bits | 106.1 | 105.2 | 104.7 | 104.3 | 104.3 |
+
+The terms at 2^18: WHIR opening 104.3 (the binding term; 110 bits per term,
+rate 1/32, folding 4, grinding up to 32 bits), constraint batching 109.0,
+zerocheck 114.5 and its sumcheck 113.5, bit ring switch 114.0, column
+batching 115.2, commitment and transcript collision 128 (Blake3). The
+garbling adds 128-bit labels under a random secret `Δ` with Blake3 as the
+PRF; it is privacy-free, which the BitVM setting allows since the proof is
+public. Two of Plonky3's data-dependent branches are fixed in the circuit
+and guarded by checks (nonzero `tau` draws, no Boolean prefix on the column
+point), each rejecting where Plonky3 would continue with probability
+~2^-127 per coordinate, never the reverse.
+
+## Layout
+
+| module | what |
+| --- | --- |
+| `tower` | `GF(2^128)` tower arithmetic on wires, level by level against `p3-binary-field` |
+| `blake3` | the Blake3 gadget, any input length |
+| `pruned` | expansion of Plonky3's pruned Merkle proofs into per-query paths |
+| `reference` | the WHIR verifier on field elements, op for op with Plonky3 |
+| `circuit` | the WHIR verifier on wires, with a prefix hook and a gate profile |
+| `stark`, `stark_circuit` | the multi-STARK layers (zerocheck, column batching, bit ring switch) as reference and as wires |
+| `garble` | garbling and evaluation of a stored gate list |
+| `stream` | the planned streaming garbler: garble, evaluate and check gate by gate in live-wire memory |
+| `tests/binary_whir.rs` | real WHIR proofs; `tests/keccak_stark.rs` real Keccak-f STARK proofs |
 
 ## Plan
 
-1. Done: `reference`, checked op for op against the logged run and accepting
-   the real proofs; `circuit`, accepting them in Execute mode; `garble`, the
-   true label only for a valid proof; `stream`, the 2^18 schedule garbled in
-   250 MB of memory; multi-chunk Blake3; the Merkle cap.
-2. The on-chain side waits for a design. Then the evaluator's half: the
-   ciphertexts streamed to it, and the garbling made verifiable
-   (cut-and-choose or a proof of correct garbling), which is what the fixed
-   public `Δ` upstream stands in for.
+1. Done: the WHIR verifier and the full multi-STARK verifier, each checked
+   op for op against Plonky3's run and accepting real proofs; garbled and
+   evaluated by streaming in live-wire memory; multi-chunk Blake3; the
+   Merkle cap; profiles and parameter sweeps.
+2. Circuit size: the ring switch closing (a third of the full verifier), a
+   sub-Karatsuba `GF(2^128)` multiplier (a quarter of every circuit is
+   multiplication), per-tree cap heights (a Plonky3 change), and the trace
+   width of the statement that will actually be verified, which sets three
+   of the big items.
+3. The on-chain side waits for a design. Verifiable garbling comes from
+   `bitvm-gc`'s zkVM proof of garbling (its `check_guest` uses the same gate
+   formulas; with Blake3 as the PRF the guest needs the `blake3` feature
+   rather than the Poseidon2 or AES precompiles), not from cut-and-choose.
