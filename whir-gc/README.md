@@ -215,9 +215,17 @@ full circuit through the garbler. Rate 1/32, folding 4, terminal security
 | 2^12 rows (163 Keccak-f) | 16 | 77,736,394 | 1,243 MB | 43 s | 616 MB | 874,240 bits | 75 s |
 | **2^16 rows (2,621 Keccak-f)** | 20 | **88,680,747** | **1,418 MB** | 61 s | 1.5 GB | 997,760 bits | 44 min |
 
-Each accepts its proof and rejects it with an opened value changed; the
-2^18 run is in progress (`WHIR_GC_LOG_HEIGHT=18`, about +5M gates per two
-variables, so ~95M). Where the 2^16 circuit's gates go:
+Each accepts its proof and rejects it with an opened value changed. The
+2^18 case is not yet measured (about +5M gates per two variables from the
+slope above, so ~95M); it is the `#[ignore]`d test, a few hours of proving
+on one core with a 6 GB peak:
+
+```
+WHIR_GC_LOG_HEIGHT=18 cargo test -p whir-gc --release --test keccak_stark \
+    full_verifier_circuit_on_the_2_18 -- --ignored --nocapture
+```
+
+Where the 2^16 circuit's gates go:
 
 | phase | non-free gates | share |
 | --- | ---: | ---: |
