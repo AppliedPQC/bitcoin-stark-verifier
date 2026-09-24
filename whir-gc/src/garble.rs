@@ -70,14 +70,14 @@ pub fn garble(circuit: &CircuitAdapter, inputs: usize, output: usize) -> Garbled
         match *op {
             Operation::Add(d, x, y) => label0[d] = label0[x] ^ label0[y],
             Operation::Mul(d, x, y) => {
-                let h0 = label0[x].hash_ext(gid);
-                let h1 = (label0[x] ^ delta).hash_ext(gid);
+                let h0 = label0[x].hash_ext(gid, None);
+                let h1 = (label0[x] ^ delta).hash_ext(gid, None);
                 label0[d] = h0;
                 ciphertexts.push(h1 ^ h0 ^ label0[y]);
             }
             Operation::Or(d, x, y) => {
-                let h0 = label0[x].hash_ext(gid);
-                let h1 = (label0[x] ^ delta).hash_ext(gid);
+                let h0 = label0[x].hash_ext(gid, None);
+                let h1 = (label0[x] ^ delta).hash_ext(gid, None);
                 label0[d] = h1 ^ delta;
                 ciphertexts.push(h1 ^ h0 ^ (label0[y] ^ delta));
             }
@@ -122,14 +122,14 @@ pub fn evaluate(circuit: &CircuitAdapter, garbled: &Garbled, witness: &[bool]) -
                 let ct = garbled.ciphertexts[next_ct];
                 next_ct += 1;
                 value[d] = value[x] & value[y];
-                let h = label[x].hash_ext(gid);
+                let h = label[x].hash_ext(gid, None);
                 label[d] = if value[x] { h ^ ct ^ label[y] } else { h };
             }
             Operation::Or(d, x, y) => {
                 let ct = garbled.ciphertexts[next_ct];
                 next_ct += 1;
                 value[d] = value[x] | value[y];
-                let h = label[x].hash_ext(gid);
+                let h = label[x].hash_ext(gid, None);
                 label[d] = if value[x] { h } else { h ^ ct ^ label[y] };
             }
             Operation::Const(..) => panic!("constant gates are not used"),
