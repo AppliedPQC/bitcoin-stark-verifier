@@ -41,6 +41,7 @@
 use garbled_snark_verifier::circuits::sect233k1::builder::{
     CircuitAdapter, CircuitTrait, CustomGateParams, CustomGateType, GateCounts, GateOperation, Template,
 };
+use garbled_snark_verifier::core::gate::{GateType, gate_garbled_with_delta};
 use garbled_snark_verifier::core::s::S;
 
 /// A builder that learns each input wire's value as the wire is allocated.
@@ -369,13 +370,11 @@ impl Streaming {
     /// held input labels and require the held output label.
     fn non_free(&mut self, x: usize, y: usize, is_or: bool) -> usize {
         let gid = u32::try_from(self.non_free).expect("gate ids fit in u32");
-        let h0 = self.label0[x].hash_ext(gid, None);
-        let h1 = (self.label0[x] ^ self.delta).hash_ext(gid, None);
-        let (c0, ct, v) = if is_or {
-            (h1 ^ self.delta, h1 ^ h0 ^ (self.label0[y] ^ self.delta), self.value[x] | self.value[y])
-        } else {
-            (h0, h1 ^ h0 ^ self.label0[y], self.value[x] & self.value[y])
-        };
+        // bitvm-gc's garbling of the gate, under this garbler's delta and no salt.
+        let gate_type = if is_or { GateType::Or } else { GateType::And };
+        let (c0, ct) = gate_garbled_with_delta(self.label0[x], self.label0[y], gid, gate_type, self.delta, None);
+        let ct = ct.expect("AND and OR gates carry a ciphertext");
+        let v = if is_or { self.value[x] | self.value[y] } else { self.value[x] & self.value[y] };
         // The evaluator, holding the labels of the values.
         let h = self.held(x).hash_ext(gid, None);
         let evaluated = if self.value[x] != is_or { h ^ ct ^ self.held(y) } else { h };

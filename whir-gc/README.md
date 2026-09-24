@@ -82,9 +82,9 @@ transcript), the final polynomial.
 
 ## Garbled, measured
 
-`garble` walks a stored gate list with one label per wire -- the same
-formulas as `bitvm-gc`'s `gate_garbled`/`Gate::e` (privacy-free: one 16-byte
-ciphertext per AND/OR, free XOR, `H(l) = Blake3(l ‖ gid)`), without
+`garble` walks a stored gate list with one label per wire -- each gate
+garbled by `bitvm-gc`'s own `gate_garbled_with_delta` (privacy-free: one
+16-byte ciphertext per AND/OR, free XOR, `H(l) = Blake3(l ‖ gid)`), without
 materialising a `Wire` per wire -- and `evaluate` walks it with the proof's
 values, which is the BitVM3 setting: the proof is public, and the point is
 that the output's *true* label comes out only of an accepting evaluation.

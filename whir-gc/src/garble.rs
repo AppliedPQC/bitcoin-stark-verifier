@@ -3,9 +3,9 @@
 //! `bitvm-gc` garbles through `CircuitAdapter::build`, which materialises an
 //! `Rc<RefCell<Wire>>` per wire and a `Gate` per gate -- fine for its
 //! sub-circuit splits, but tens of gigabytes for a verifier of 10^8 wires. This
-//! walks the gate list once with one 16-byte label per wire, using the same
-//! gate formulas as `garbled_snark_verifier::core::gate::gate_garbled` and
-//! `Gate::e`:
+//! walks the gate list once with one 16-byte label per wire, garbling each
+//! gate through `garbled_snark_verifier::core::gate::gate_garbled_with_delta`
+//! and evaluating with the formulas of its `Gate::e`:
 //!
 //! - **XOR is free**: `c0 = a0 ⊕ b0`, and the evaluator XORs its labels.
 //! - **AND**, one ciphertext: `c0 = H(a0)`, `ct = H(a1) ⊕ H(a0) ⊕ b0` with
@@ -27,6 +27,7 @@
 //! random `Δ` per garbling, which is what this does.
 
 use garbled_snark_verifier::circuits::sect233k1::builder::{CircuitAdapter, CircuitTrait, GateOperation, Operation};
+use garbled_snark_verifier::core::gate::{GateType, gate_garbled_with_delta};
 use garbled_snark_verifier::core::s::S;
 
 /// A garbled circuit: what the garbler hands the evaluator, and what it keeps.
@@ -69,17 +70,11 @@ pub fn garble(circuit: &CircuitAdapter, inputs: usize, output: usize) -> Garbled
         let GateOperation::Base(op) = g else { panic!("custom gates are not used") };
         match *op {
             Operation::Add(d, x, y) => label0[d] = label0[x] ^ label0[y],
-            Operation::Mul(d, x, y) => {
-                let h0 = label0[x].hash_ext(gid, None);
-                let h1 = (label0[x] ^ delta).hash_ext(gid, None);
-                label0[d] = h0;
-                ciphertexts.push(h1 ^ h0 ^ label0[y]);
-            }
-            Operation::Or(d, x, y) => {
-                let h0 = label0[x].hash_ext(gid, None);
-                let h1 = (label0[x] ^ delta).hash_ext(gid, None);
-                label0[d] = h1 ^ delta;
-                ciphertexts.push(h1 ^ h0 ^ (label0[y] ^ delta));
+            Operation::Mul(d, x, y) | Operation::Or(d, x, y) => {
+                let gate_type = if matches!(*op, Operation::Or(..)) { GateType::Or } else { GateType::And };
+                let (c0, ct) = gate_garbled_with_delta(label0[x], label0[y], gid, gate_type, delta, None);
+                label0[d] = c0;
+                ciphertexts.push(ct.expect("AND and OR gates carry a ciphertext"));
             }
             Operation::Const(..) => panic!("constant gates are not used"),
         }
