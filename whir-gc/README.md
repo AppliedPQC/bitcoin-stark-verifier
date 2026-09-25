@@ -3,7 +3,7 @@
 A binary-field STARK verifier as a Boolean circuit, to be garbled. It is
 Plonky3's `p3-multi-stark` over the WHIR polynomial commitment, with every field
 in the `GF(2^128)` tower and Blake3 for commitments, transcript and garbling.
-The paper, [`paper/main.pdf`](../paper/main.pdf), covers the design, the
+The paper, [`paper/garbled-stark-verifier.pdf`](../paper/garbled-stark-verifier.pdf), covers the design, the
 security and post-quantum analysis, the on-chain protocol and its cost, and the
 full measurements.
 
@@ -60,6 +60,7 @@ The ignored tests are:
 | `stored_build_of_the_full_verifier` | the memory comparison |
 | `whir_schedule_of_the_measured_configurations` | queries and grinding per round |
 | `input_bits_of_whir_configurations` | the input-size sweep |
+| `garbled_before_the_proof_evaluates_real_proofs` | garbles with every input at 0, then evaluates the stored garbling on a real proof (label of 1) and on a changed proof (label of 0) |
 
 ## Layout
 

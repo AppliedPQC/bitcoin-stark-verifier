@@ -891,3 +891,259 @@ fn input_bits_of_whir_configurations() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Garbling before the proof exists, evaluating afterwards.
+// ---------------------------------------------------------------------------
+
+use garbled_snark_verifier::circuits::sect233k1::builder::{CustomGateParams, CustomGateType, GateCounts, GateOperation, Template};
+use garbled_snark_verifier::core::gate::{GateType, gate_evaluate};
+use garbled_snark_verifier::core::s::S;
+
+/// The garbler at setup: `Streaming` with every input held at 0, so that the
+/// garbling depends on the circuit alone. It records the false label of
+/// every fresh wire in creation order, which is what the evaluator's input
+/// labels are derived from.
+struct Blind {
+    inner: Streaming,
+    input_label0: Vec<S>,
+}
+
+impl CircuitTrait for Blind {
+    fn fresh_one(&mut self) -> usize {
+        let w = self.inner.fresh_one();
+        self.input_label0.push(self.inner.label0(w));
+        w
+    }
+    fn fresh<const N: usize>(&mut self) -> [usize; N] {
+        core::array::from_fn(|_| self.fresh_one())
+    }
+    fn zero(&mut self) -> usize {
+        self.inner.zero()
+    }
+    fn one(&mut self) -> usize {
+        self.inner.one()
+    }
+    fn xor_wire(&mut self, x: usize, y: usize) -> usize {
+        self.inner.xor_wire(x, y)
+    }
+    fn or_wire(&mut self, x: usize, y: usize) -> usize {
+        self.inner.or_wire(x, y)
+    }
+    fn and_wire(&mut self, x: usize, y: usize) -> usize {
+        self.inner.and_wire(x, y)
+    }
+    fn push_custom_gate(&mut self, params: CustomGateParams, new_wire_idx: usize) {
+        self.inner.push_custom_gate(params, new_wire_idx)
+    }
+    fn get_gates(&self) -> &Vec<GateOperation> {
+        self.inner.get_gates()
+    }
+    fn gate_counts(&self) -> GateCounts {
+        self.inner.gate_counts()
+    }
+    fn next_wire(&self) -> usize {
+        self.inner.next_wire()
+    }
+    fn init_circuit_config_for_custom_gate(&mut self, templ_type: CustomGateType) -> &Template {
+        self.inner.init_circuit_config_for_custom_gate(templ_type)
+    }
+    fn get_template(&self, templ_type: CustomGateType) -> Option<&Template> {
+        self.inner.get_template(templ_type)
+    }
+}
+
+impl ValuedBuilder for Blind {
+    fn set_input(&mut self, wire: usize, _value: bool) {
+        self.inner.set_input(wire, false);
+    }
+}
+
+/// The evaluator: the same builder run on the proof, holding one label per
+/// wire (the label of its value) and reading the stored ciphertexts in gate
+/// order. It never sees `Δ` or a false label it does not hold.
+struct Evaluator<'a> {
+    label: Vec<S>,
+    value: Vec<bool>,
+    inputs: &'a [S],
+    next_input: usize,
+    ciphertexts: &'a [S],
+    gid: usize,
+    counts: GateCounts,
+    empty: Vec<GateOperation>,
+}
+
+impl<'a> Evaluator<'a> {
+    /// `constants`: the held labels of wires 0 and 1; `inputs`: the held label
+    /// of each fresh wire, in creation order.
+    fn new(constants: [S; 2], inputs: &'a [S], ciphertexts: &'a [S]) -> Self {
+        Self { label: constants.to_vec(), value: vec![false, true], inputs, next_input: 0, ciphertexts, gid: 0, counts: GateCounts::default(), empty: Vec::new() }
+    }
+
+    fn push(&mut self, label: S, value: bool) -> usize {
+        self.label.push(label);
+        self.value.push(value);
+        self.label.len() - 1
+    }
+
+    fn non_free(&mut self, x: usize, y: usize, gate_type: GateType) -> usize {
+        let gid = u32::try_from(self.gid).expect("gate ids fit in u32");
+        let ct = self.ciphertexts[self.gid];
+        self.gid += 1;
+        let label = gate_evaluate(gate_type, self.value[x], self.label[x], self.label[y], Some(ct), gid, None);
+        let value = if gate_type == GateType::Or { self.value[x] | self.value[y] } else { self.value[x] & self.value[y] };
+        self.push(label, value)
+    }
+}
+
+impl CircuitTrait for Evaluator<'_> {
+    fn fresh_one(&mut self) -> usize {
+        let label = self.inputs[self.next_input];
+        self.next_input += 1;
+        self.push(label, false)
+    }
+    fn fresh<const N: usize>(&mut self) -> [usize; N] {
+        core::array::from_fn(|_| self.fresh_one())
+    }
+    fn zero(&mut self) -> usize {
+        0
+    }
+    fn one(&mut self) -> usize {
+        1
+    }
+    // The folding rules are `Streaming`'s, rule for rule, so the two builds
+    // meet the same non-free gates in the same order.
+    fn xor_wire(&mut self, x: usize, y: usize) -> usize {
+        if x == y {
+            return 0;
+        }
+        if x == 0 {
+            return y;
+        }
+        if y == 0 {
+            return x;
+        }
+        self.counts.direct_xor += 1;
+        let (l, v) = (self.label[x] ^ self.label[y], self.value[x] ^ self.value[y]);
+        self.push(l, v)
+    }
+    fn or_wire(&mut self, x: usize, y: usize) -> usize {
+        if x == y {
+            return x;
+        }
+        if x == 1 || y == 1 {
+            return 1;
+        }
+        if x == 0 {
+            return y;
+        }
+        if y == 0 {
+            return x;
+        }
+        self.counts.direct_or += 1;
+        self.non_free(x, y, GateType::Or)
+    }
+    fn and_wire(&mut self, x: usize, y: usize) -> usize {
+        if x == y {
+            return x;
+        }
+        if x == 0 || y == 0 {
+            return 0;
+        }
+        if x == 1 {
+            return y;
+        }
+        if y == 1 {
+            return x;
+        }
+        self.counts.direct_and += 1;
+        self.non_free(x, y, GateType::And)
+    }
+    fn push_custom_gate(&mut self, _params: CustomGateParams, _new_wire_idx: usize) {
+        unimplemented!("custom gates are not used")
+    }
+    fn get_gates(&self) -> &Vec<GateOperation> {
+        &self.empty
+    }
+    fn gate_counts(&self) -> GateCounts {
+        self.counts
+    }
+    fn next_wire(&self) -> usize {
+        self.label.len()
+    }
+    fn init_circuit_config_for_custom_gate(&mut self, _templ_type: CustomGateType) -> &Template {
+        unimplemented!("custom gates are not used")
+    }
+    fn get_template(&self, _templ_type: CustomGateType) -> Option<&Template> {
+        None
+    }
+}
+
+impl ValuedBuilder for Evaluator<'_> {
+    fn set_input(&mut self, wire: usize, value: bool) {
+        self.value[wire] = value;
+    }
+}
+
+/// Garble the full verifier before any proof is used (every input held at
+/// 0), store the ciphertexts, then evaluate them on the labels of a real
+/// proof, which must give the label of 1, and of the proof with one opened
+/// value changed, which must give the label of 0: the label a challenger
+/// takes to Disprove.
+fn garble_then_evaluate(log_height: usize) {
+    let _heavy = heavy();
+    let p = params(log_height);
+    let run = prove_and_log(&p);
+    let inp = inputs(&p, &run);
+
+    let mut plan = Plan::new();
+    build_full(&mut plan, &inp, &inp);
+    let t = std::time::Instant::now();
+    let mut g = Blind { inner: Streaming::planned(plan, true), input_label0: Vec::new() };
+    let (shape, _) = build_full(&mut g, &inp, &inp);
+    let garble_time = t.elapsed();
+    assert!(!g.inner.value(shape.output), "the placeholder witness is rejected");
+    let delta = g.inner.delta();
+    let reject = g.inner.label0(shape.output);
+    let accept = reject ^ delta;
+    let constants = [g.inner.label0(0), g.inner.label0(1) ^ delta];
+    let ciphertexts = g.inner.ciphertexts().to_vec();
+    let input_label0 = std::mem::take(&mut g.input_label0);
+    let non_free = g.inner.non_free_gates();
+    drop(g);
+
+    let evaluate = |proof: &Inputs, what: &str| -> (S, std::time::Duration) {
+        // The witness in allocation order, as the circuit reads it; the
+        // soldering hands over the label of each published bit's value.
+        let mut counter = Plan::new();
+        let (_, witness) = build_full(&mut counter, proof, &inp);
+        assert_eq!(witness.len(), input_label0.len(), "{what}: every fresh wire is an input");
+        let held: Vec<S> = input_label0.iter().zip(&witness).map(|(&l, &b)| if b { l ^ delta } else { l }).collect();
+        let t = std::time::Instant::now();
+        let mut e = Evaluator::new(constants, &held, &ciphertexts);
+        let (shape, _) = build_full(&mut e, proof, &inp);
+        let time = t.elapsed();
+        assert_eq!(e.gid, non_free, "{what}: the same non-free gates");
+        (e.label[shape.output], time)
+    };
+
+    let (honest, eval_time) = evaluate(&inp, "honest");
+    assert_eq!(honest, accept, "the honest proof yields the label of 1");
+    assert_ne!(honest, reject);
+    let mut bad = inp.clone();
+    bad.sdata.values[7] += F::ONE;
+    let (changed, _) = evaluate(&bad, "changed");
+    assert_eq!(changed, reject, "a changed proof yields the label of 0");
+    eprintln!(
+        "2^{log_height} rows: garbled {non_free} non-free gates with every input at 0 in {garble_time:.1?} ({} MB stored); \
+         evaluated on the proof in {eval_time:.1?}: label of 1; on the changed proof: label of 0",
+        ciphertexts.len() * 16 / 1_000_000
+    );
+}
+
+#[test]
+#[ignore]
+fn garbled_before_the_proof_evaluates_real_proofs() {
+    let log_height = std::env::var("WHIR_GC_LOG_HEIGHT").ok().map_or(5, |s| s.parse().expect("a log height"));
+    garble_then_evaluate(log_height);
+}

@@ -1,0 +1,6 @@
+garbled_before_the_proof_evaluates_real_proofs (whir-gc/tests/keccak_stark.rs), 32 GB / 8 cores, Xeon 8375C, 2026-09-25
+2^5 rows: garbled 44573121 non-free gates with every input at 0 in 20.6s (713 MB stored); evaluated on the proof in 11.5s: label of 1; on the changed proof: label of 0  (peak RSS 6,331,348 KiB)
+2^8 rows: garbled 66459859 non-free gates with every input at 0 in 34.0s (1063 MB stored); evaluated on the proof in 17.0s: label of 1; on the changed proof: label of 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 100.68s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:40.77
+	Maximum resident set size (kbytes): 9362952

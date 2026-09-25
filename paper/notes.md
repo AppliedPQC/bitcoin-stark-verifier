@@ -1,6 +1,6 @@
 # Literature notes for the whir-gc paper
 
-These are working notes, one section per source, kept alongside `main.tex`. Each
+These are working notes, one section per source, kept alongside `garbled-stark-verifier.tex`. Each
 number is quoted from the source, with its section, table or figure. Anything
 marked **[ours]** is our own reading or measurement and not a claim the source
 makes. PDFs are in `refs/`, which is git-ignored.
@@ -467,4 +467,22 @@ At 2^20 that is 7.5 garbled bits per trace bit, or 38 kB per Keccak-f. Smaller i
    - **Open, needs the authors:** the author list; hash-based soldering to M kept
      instances at a million input bits; a narrower AIR or recursion for a smaller
      input; the adaptive-authenticity reference.
+10. **Review round 4 (2026-09-25).**
+    - **Fixed:**
+      - Garbling before the proof is now measured by
+        `garbled_before_the_proof_evaluates_real_proofs`
+        (`data/run-garble-then-evaluate.txt`). Evaluation takes 11.5 s at 2^5
+        and 17.0 s at 2^8, against 20.6 s and 34.0 s for garbling.
+      - The quantum level of the Lamport keys is ≈64 bits with 16-byte
+        preimages.
+      - Citations added: Binius, ring switching, Wiedemann, LFKN, HyperPlonk,
+        STIR, Cantor, LCH14, Blake3 and FIPS 202. Their metadata is from memory
+        and still needs checking.
+      - Related work now covers BitVM3's Table 9 estimate for a garbled STARK
+        and TRAPGC-DV.
+      - The cut-and-choose setup cost is derived.
+      - Tables no longer use resizebox. Fonts are vector (lmodern + T1); the
+        PDF had two Type 3 bitmap fonts before.
+      - The paper is renamed to `garbled-stark-verifier.tex`.
+    - **Open, needs the authors:** the title's "Post-Quantum".
 
