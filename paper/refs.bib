@@ -1,0 +1,434 @@
+% Bibliography for the whir-gc paper draft.
+% Entries marked "read" were read in full or in the relevant parts; the rest
+% are cited as the read papers cite them and have NOT been checked by us.
+
+% ---------------------------------------------------------------- read
+
+@misc{babe2026,
+  author       = {Sanjam Garg and Dimitris Kolonelos and Mikhail Sergeevitch and Srivatsan Sridhar and David Tse},
+  title        = {{BABE}: Verifying Proofs on {Bitcoin} Made 1000x Cheaper},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/065},
+  year         = {2026},
+  url          = {https://eprint.iacr.org/2026/065},
+  annote         = {read; 61 pp.},
+}
+
+@misc{pipesv2,
+  author       = {Michel Abdalla and Brent Carmer and Muhammed El Gebali and Handan Kilinc-Alper and Mikhail Komarov and Yaroslav Rebenko and Lev Soukhanov and Erkan Tairi and Elena Tatuzova and Patrick Towa},
+  title        = {Bitcoin {PIPEs} v2: Covenants and {ZKPs} on {Bitcoin} via Witness Encryption},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/186},
+  year         = {2026},
+  url          = {https://eprint.iacr.org/2026/186},
+  annote         = {read; 22 pp.},
+}
+
+@misc{aadp2026,
+  author       = {Lev Soukhanov and Yaroslav Rebenko and Muhammad El Gebali and Mikhail Komarov and Handan Kilinc-Alper and Michel Abdalla and Patrick Towa},
+  title        = {Implementable Witness Encryption from Arithmetic Affine Determinant Programs},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/175},
+  year         = {2026},
+  url          = {https://eprint.iacr.org/2026/175},
+  annote         = {read; 38 pp.},
+}
+
+@misc{garudapari,
+  author       = {Michel Dellepere and Pratyush Mishra and Alireza Shirzad},
+  title        = {Garuda and Pari: Faster and Smaller {SNARKs} via Equifficient Polynomial Commitments},
+  howpublished = {Cryptology ePrint Archive, Paper 2024/1245},
+  year         = {2024},
+  url          = {https://eprint.iacr.org/2024/1245},
+  annote         = {read: intro, techniques, evaluation, Pari construction (Fig. 6); formal sections skimmed; 52 pp.},
+}
+
+@misc{flb25,
+  author       = {Ariel Futoransky and Gabriel Larotonda and Fadi Barbara},
+  title        = {A Note on the Security of the {BitVM3} Garbling Scheme},
+  howpublished = {Cryptology ePrint Archive, Paper 2025/1291},
+  year         = {2025},
+  url          = {https://eprint.iacr.org/2025/1291},
+  annote         = {read; 7 pp.},
+}
+
+@misc{goatpbwe,
+  author       = {Stephen Duan},
+  title        = {Partial-Binding Witness Encryption over {Groth16}},
+  howpublished = {GOATNetwork/bitvm-gc, \texttt{docs/partial\_binding\_we.tex}},
+  year         = {2026},
+  annote         = {read; dated 2026-04-19; internal note, cites BABE as "Goat Research Team", which is wrong},
+}
+
+@misc{bitvmgc,
+  author       = {{GOAT Network}},
+  title        = {bitvm-gc: garbled {SNARK} verifier and {BABE} for {BitVM}},
+  howpublished = {\url{https://github.com/GOATNetwork/bitvm-gc}},
+  year         = {2026},
+  annote         = {code; branch whir-gc-upstream at 10083d4 carries our Blake3, streaming and evaluator changes},
+}
+
+@misc{plonky3,
+  author       = {{Plonky3 contributors}},
+  title        = {Plonky3: binary tower fields, {WHIR} and multi-{STARK}},
+  howpublished = {\url{https://github.com/Plonky3/Plonky3}},
+  year         = {2026},
+  annote         = {code; rev ca4da2daa2e0dfdd31419af5c870813083398955 (p3-binary-field, p3-whir, p3-binary-pcs, p3-multi-stark)},
+}
+
+% ------------------------------------------ cited by the papers above; not read by us
+
+@misc{lin25bitvm3,
+  author       = {Robin Linus},
+  title        = {{BitVM3}: Efficient Computation on {Bitcoin}},
+  howpublished = {\url{https://bitvm.org/bitvm3-rsa.pdf}},
+  year         = {2025},
+  annote         = {not read; attacked by flb25},
+}
+
+@misc{fdz25,
+  author       = {Alva Fu and Stephen Duan and Ethan Zhu},
+  title        = {Instantiating {BitVM3} from Label Forward Propagation},
+  howpublished = {\url{https://www.goat.network/bitvm3-label-forward-propagation}},
+  year         = {2025},
+  annote         = {not read; attacked by flb25 (Sec. 3)},
+}
+
+@misc{eag25glock,
+  author       = {Liam Eagen},
+  title        = {Glock: Garbled Locks for {Bitcoin}},
+  howpublished = {Cryptology ePrint Archive, Paper 2025/1485},
+  year         = {2025},
+  annote         = {not read; per BABE: designated-verifier SNARK on a binary curve, ~12 MB garbled circuit},
+}
+
+@misc{el26argo,
+  author       = {Liam Eagen and Ying Tong Lai},
+  title        = {Argo {MAC}: Garbling with Elliptic Curve {MACs}},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/049},
+  year         = {2026},
+  annote         = {not read; basis of BABE's scalar-multiplication garbling},
+}
+
+@misc{laa25bitvm2,
+  author       = {Robin Linus and Lukas Aumayr and Zeta Avarikioti and Matteo Maffei and Andrea Pelosi and Orfeas Stefanos Thyfronitis Litos and Christos Stefo and David Tse and Alexei Zamyatin},
+  title        = {Bridging {Bitcoin} to Second Layers via {BitVM2}},
+  howpublished = {Cryptology ePrint Archive, Paper 2025/1158},
+  year         = {2025},
+  annote         = {not read},
+}
+
+@misc{bit25b,
+  author       = {{BitVM}},
+  title        = {Garbled {SNARK} Verifier},
+  howpublished = {\url{https://github.com/BitVM/garbled-snark-verifier}},
+  year         = {2025},
+  annote         = {not read; per BABE: Groth16 verifier GC, ~10B gates, 2.7--3B non-free, ~42 GiB},
+}
+
+@misc{che25sok,
+  author       = {Weikeng Chen},
+  title        = {{SoK}: {BitVM} with Succinct On-Chain Cost},
+  howpublished = {Cryptology ePrint Archive, Paper 2025/1253},
+  year         = {2025},
+  annote         = {not read},
+}
+
+@inproceedings{bij20adp,
+  author    = {James Bartusek and Yuval Ishai and Aayush Jain and Fermi Ma and Amit Sahai and Mark Zhandry},
+  title     = {Affine Determinant Programs: A Framework for Obfuscation and Witness Encryption},
+  booktitle = {ITCS 2020},
+  series    = {LIPIcs},
+  volume    = {151},
+  pages     = {82:1--82:39},
+  year      = {2020},
+  annote      = {not read},
+}
+
+@inproceedings{ggsw13,
+  author    = {Sanjam Garg and Craig Gentry and Amit Sahai and Brent Waters},
+  title     = {Witness Encryption and its Applications},
+  booktitle = {45th ACM STOC},
+  pages     = {467--476},
+  year      = {2013},
+  annote      = {not read},
+}
+
+@inproceedings{gkpw24,
+  author    = {Sanjam Garg and Dimitris Kolonelos and Guru-Vamsi Policharla and Mingyuan Wang},
+  title     = {Threshold Encryption with Silent Setup},
+  booktitle = {CRYPTO 2024, Part VII},
+  series    = {LNCS},
+  volume    = {14926},
+  pages     = {352--386},
+  year      = {2024},
+  annote      = {not read; linear-pairing WE used by BABE},
+}
+
+@inproceedings{gro16,
+  author    = {Jens Groth},
+  title     = {On the Size of Pairing-Based Non-interactive Arguments},
+  booktitle = {EUROCRYPT 2016, Part II},
+  series    = {LNCS},
+  volume    = {9666},
+  pages     = {305--326},
+  year      = {2016},
+}
+
+@inproceedings{zre15,
+  author    = {Samee Zahur and Mike Rosulek and David Evans},
+  title     = {Two Halves Make a Whole: Reducing Data Transfer in Garbled Circuits Using Half Gates},
+  booktitle = {EUROCRYPT 2015, Part II},
+  series    = {LNCS},
+  volume    = {9057},
+  pages     = {220--250},
+  year      = {2015},
+}
+
+@inproceedings{ks08,
+  author    = {Vladimir Kolesnikov and Thomas Schneider},
+  title     = {Improved Garbled Circuit: Free {XOR} Gates and Applications},
+  booktitle = {ICALP 2008, Part II},
+  series    = {LNCS},
+  volume    = {5126},
+  pages     = {486--498},
+  year      = {2008},
+}
+
+% ------------------------------------ added after review; metadata from ePrint abstracts
+
+@misc{kflt26native,
+  author       = {Nakul Khambhati and Aaron Feickert and Christian Lewe and Mukesh Tiwari},
+  title        = {Garbling {Groth16} with Native Group Operations},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/2100},
+  year         = {2026},
+  annote       = {abstract: 2.4 MiB garbled program incl. projectivization vs 48 GB Boolean},
+}
+
+@misc{bitvm3paper,
+  author       = {Robin Linus Woll and Ioannis Alexopoulos and Lukas Aumayr and Zeta Avarikioti and Matteo Maffei and David Tse},
+  title        = {{BitVM3}: Efficient {Bitcoin} Bridges via Garbled Circuits},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/933},
+  year         = {2026},
+  annote       = {abstract: BitVM3-CORE formalised; ~\$9 total on-chain, \$0.20 challenge},
+}
+
+@misc{mosaic26,
+  author       = {Nakul Khambhati and Mukesh Tiwari and Azz and Sapin Bajracharya and Manish Bista and Liam Eagen and Christian Lewe and Aaron Feickert},
+  title        = {Mosaic: Practical Malicious Security for Garbled Circuits on {Bitcoin}},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/812},
+  year         = {2026},
+  annote       = {abstract: polynomial label correlation; cut-and-choose with on-chain footprint independent of copies},
+}
+
+@misc{antichain26,
+  author       = {Mukesh Tiwari and Aaron Feickert},
+  title        = {Antichain {Winternitz}: Guaranteed Garbled-Circuit Label Revelation on {Bitcoin} with Permissionless Recovery},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/1568},
+  year         = {2026},
+  annote       = {abstract: up to 52.9\% saving over Lamport, 43.8 kB off-chain per message bit},
+}
+
+@inproceedings{fno15privacyfree,
+  author    = {Tore Kasper Frederiksen and Jesper Buus Nielsen and Claudio Orlandi},
+  title     = {Privacy-Free Garbled Circuits with Applications to Efficient Zero-Knowledge},
+  booktitle = {EUROCRYPT 2015, Part II},
+  series    = {LNCS},
+  volume    = {9057},
+  pages     = {191--219},
+  year      = {2015},
+  annote    = {pages checked via web search (Springer, dblp)},
+}
+
+@inproceedings{bhr12foundations,
+  author    = {Mihir Bellare and Viet Tung Hoang and Phillip Rogaway},
+  title     = {Foundations of Garbled Circuits},
+  booktitle = {ACM CCS 2012},
+  pages     = {784--796},
+  year      = {2012},
+  annote    = {metadata as cited in BABE},
+}
+
+@inproceedings{ckkz12freexor,
+  author    = {Seung Geol Choi and Jonathan Katz and Ranjit Kumaresan and Hong-Sheng Zhou},
+  title     = {On the Security of the ``Free-{XOR}'' Technique},
+  booktitle = {TCC 2012},
+  series    = {LNCS},
+  volume    = {7194},
+  pages     = {39--53},
+  year      = {2012},
+  annote    = {circular correlation robustness for free-XOR; pages checked via web search},
+}
+
+@misc{zkmhashpq,
+  author       = {{ZKM}},
+  title        = {Hash-based is not the same as post-quantum},
+  howpublished = {\url{https://www.zkm.io/blog/hash-based-is-not-the-same-as-post-quantum}},
+  year         = {2026},
+  annote       = {blog, 2026-09-03},
+}
+
+% ------------------------------------------------ quantum analysis (pages checked via web search, 2026-09-24)
+
+@inproceedings{cms19qrom,
+  author    = {Alessandro Chiesa and Peter Manohar and Nicholas Spooner},
+  title     = {Succinct Arguments in the Quantum Random Oracle Model},
+  booktitle = {TCC 2019},
+  year      = {2019},
+  note      = {Cryptology ePrint Archive, Paper 2019/834},
+  annote    = {checked in the ePrint text: BCS on public-coin IOPs with round-by-round soundness error eps has soundness O(t^2 eps + t^3/2^lambda) against t-query quantum attackers},
+}
+
+@inproceedings{grover96,
+  author    = {Lov K. Grover},
+  title     = {A Fast Quantum Mechanical Algorithm for Database Search},
+  booktitle = {28th ACM STOC},
+  pages     = {212--219},
+  year      = {1996},
+  annote    = {pages checked via web search (ACM DL)},
+}
+
+@inproceedings{bht98,
+  author    = {Gilles Brassard and Peter H{\o}yer and Alain Tapp},
+  title     = {Quantum Cryptanalysis of Hash and Claw-Free Functions},
+  booktitle = {LATIN 1998},
+  series    = {LNCS},
+  volume    = {1380},
+  pages     = {163--169},
+  year      = {1998},
+  annote    = {quantum collision search in O(2^{n/3}); pages checked via web search (dblp, Springer)},
+}
+
+@inproceedings{shor94,
+  author    = {Peter W. Shor},
+  title     = {Algorithms for Quantum Computation: Discrete Logarithms and Factoring},
+  booktitle = {35th FOCS},
+  pages     = {124--134},
+  year      = {1994},
+  annote    = {pages checked via web search (dblp, IEEE)},
+}
+
+@inproceedings{whir25,
+  author    = {Gal Arnon and Alessandro Chiesa and Giacomo Fenzi and Eylon Yogev},
+  title     = {{WHIR}: {Reed--Solomon} Proximity Testing with Super-Fast Verification},
+  booktitle = {EUROCRYPT 2025},
+  year      = {2025},
+  note      = {Cryptology ePrint Archive, Paper 2024/1586},
+  annote    = {checked: Sec. 5.1 proves round-by-round soundness, "which ensures Fiat-Shamir and BCS security"},
+}
+
+@misc{appliedpqcscript,
+  author       = {{Applied PQC}},
+  title        = {bitcoin-stark-verifier: a {STARK} verifier in {Bitcoin Script} without {OP\_CAT}},
+  howpublished = {\url{https://github.com/AppliedPQC/bitcoin-stark-verifier}},
+  year         = {2026},
+  annote       = {our companion work; README: 2^20 example config 2,162 Poseidon2 permutations = 1.24 GB = 309.3 blocks; lambda=100, 16 vars: 976 permutations, 139.6 blocks; a standard transaction holds 0.70 of one permutation},
+}
+
+@inproceedings{bhr12adaptive,
+  author    = {Mihir Bellare and Viet Tung Hoang and Phillip Rogaway},
+  title     = {Adaptively Secure Garbling with Applications to One-Time Programs and Secure Outsourcing},
+  booktitle = {ASIACRYPT 2012},
+  series    = {LNCS},
+  volume    = {7658},
+  pages     = {134--153},
+  year      = {2012},
+  annote    = {metadata as cited in BABE's bibliography},
+}
+
+@inproceedings{dp25binius,
+  author    = {Benjamin E. Diamond and Jim Posen},
+  title     = {Succinct Arguments over Towers of Binary Fields},
+  booktitle = {Advances in Cryptology -- EUROCRYPT 2025},
+  year      = {2025},
+  note      = {ePrint 2023/1784},
+  annote    = {metadata from memory; verify venue and pages},
+}
+
+@misc{dp24ringswitch,
+  author       = {Benjamin E. Diamond and Jim Posen},
+  title        = {Polylogarithmic Proofs for Multilinears over Binary Towers},
+  howpublished = {Cryptology ePrint Archive, Paper 2024/504},
+  year         = {2024},
+  annote       = {introduces ring switching; metadata from memory},
+}
+
+@article{wiedemann88,
+  author  = {Doug Wiedemann},
+  title   = {An Iterated Quadratic Extension of {GF(2)}},
+  journal = {The Fibonacci Quarterly},
+  volume  = {26},
+  number  = {4},
+  pages   = {290--295},
+  year    = {1988},
+  annote  = {metadata from memory; verify},
+}
+
+@article{lfkn92,
+  author  = {Carsten Lund and Lance Fortnow and Howard Karloff and Noam Nisan},
+  title   = {Algebraic Methods for Interactive Proof Systems},
+  journal = {Journal of the ACM},
+  volume  = {39},
+  number  = {4},
+  pages   = {859--868},
+  year    = {1992},
+}
+
+@inproceedings{hyperplonk23,
+  author    = {Binyi Chen and Benedikt B{\"u}nz and Dan Boneh and Zhenfei Zhang},
+  title     = {{HyperPlonk}: Plonk with Linear-Time Prover and High-Degree Custom Gates},
+  booktitle = {Advances in Cryptology -- EUROCRYPT 2023},
+  year      = {2023},
+  note      = {ePrint 2022/1355},
+  annote    = {zerocheck; metadata from memory},
+}
+
+@inproceedings{stir24,
+  author    = {Gal Arnon and Alessandro Chiesa and Giacomo Fenzi and Eylon Yogev},
+  title     = {{STIR}: Reed--Solomon Proximity Testing with Fewer Queries},
+  booktitle = {Advances in Cryptology -- CRYPTO 2024},
+  year      = {2024},
+  note      = {ePrint 2024/390},
+  annote    = {metadata from memory},
+}
+
+@article{cantor89,
+  author  = {David G. Cantor},
+  title   = {On Arithmetical Algorithms over Finite Fields},
+  journal = {Journal of Combinatorial Theory, Series A},
+  volume  = {50},
+  number  = {2},
+  pages   = {285--300},
+  year    = {1989},
+  annote  = {metadata from memory; verify},
+}
+
+@inproceedings{lch14,
+  author    = {Sian-Jheng Lin and Wei-Ho Chung and Yunghsiang S. Han},
+  title     = {Novel Polynomial Basis and Its Application to {Reed--Solomon} Erasure Codes},
+  booktitle = {IEEE 55th Annual Symposium on Foundations of Computer Science (FOCS)},
+  pages     = {316--325},
+  year      = {2014},
+  annote    = {additive FFT; metadata from memory},
+}
+
+@misc{blake3spec,
+  author       = {Jack O'Connor and Jean-Philippe Aumasson and Samuel Neves and Zooko Wilcox-O'Hearn},
+  title        = {{BLAKE3}: One Function, Fast Everywhere},
+  howpublished = {\url{https://github.com/BLAKE3-team/BLAKE3-specs}},
+  year         = {2020},
+}
+
+@techreport{fips202,
+  author      = {{National Institute of Standards and Technology}},
+  title       = {{SHA-3} Standard: Permutation-Based Hash and Extendable-Output Functions},
+  institution = {NIST},
+  type        = {FIPS PUB},
+  number      = {202},
+  year        = {2015},
+}
+
+@misc{trapgcdv26,
+  author       = {Ariel Futoransky and Fadi Barb{\`a}ra and Ramses Fernandez and Gabriel Larotonda and Sergio Demian Lerner},
+  title        = {{TRAPGC-DV}: Trapdoor Garbled Circuit Designated Verification of {Groth16} on {Bitcoin}},
+  howpublished = {Cryptology ePrint Archive, Paper 2026/1430},
+  year         = {2026},
+  annote       = {abstract read on ePrint 2026-09-25; paper not read},
+}

@@ -7,7 +7,7 @@
 # sibling crates as it is written.
 [workspace]
 resolver = "2"
-members = ["poseidon2", "whir"]
+members = ["poseidon2", "whir", "whir-gc"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,19 +19,32 @@ bitcoin = "0.32.0"
 bitcoin-script = { git = "https://github.com/Bitcoin-Wildlife-Sanctuary/rust-bitcoin-script", tag = "1.0.0" }
 bitcoin-scriptexec = { git = "https://github.com/Bitcoin-Wildlife-Sanctuary/rust-bitcoin-scriptexec/", features = ["debug"], tag = "1.0.0" }
 bitvm-scriptexec = { package = "bitcoin-scriptexec", git = "https://github.com/BitVM/rust-bitcoin-scriptexec" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3" }
-p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3" }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
 # Plonky3's WHIR prover, for the end-to-end test: a real proof drives the
 # Bitcoin Script verifier.
-p3-whir = { git = "https://github.com/Plonky3/Plonky3" }
-p3-sumcheck = { git = "https://github.com/Plonky3/Plonky3", features = ["test-util"] }
-p3-challenger = { git = "https://github.com/Plonky3/Plonky3" }
-p3-commit = { git = "https://github.com/Plonky3/Plonky3" }
-p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3" }
-p3-dft = { git = "https://github.com/Plonky3/Plonky3" }
-p3-matrix = { git = "https://github.com/Plonky3/Plonky3" }
-p3-multilinear-util = { git = "https://github.com/Plonky3/Plonky3" }
+p3-whir = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-sumcheck = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955", features = ["test-util"] }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-multilinear-util = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+# The binary tower fields and WHIR over their additive domain, for the garbled
+# verifier in `whir-gc`.
+p3-binary-field = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-binary-pcs = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-blake3 = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-air = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-keccak-air = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-multi-stark = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3", rev = "ca4da2daa2e0dfdd31419af5c870813083398955" }
+# GOAT's garbler and circuit API (BitVM's `garbled-snark-verifier`, modified).
+# `_blake3` makes Blake3 the garbling PRF; with no feature the crate's `hash`
+# returns zeros, and AES is not an option here.
+garbled-snark-verifier = { git = "https://github.com/GOATNetwork/bitvm-gc", rev = "10083d4", features = ["_blake3"] }
 rand = "0.9.1"
 rand_chacha = "0.9.0"
 # Plonky3 pins rand 0.10, which has a different rand_core than the 0.9 the rest

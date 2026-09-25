@@ -1,0 +1,26 @@
+proved 2^18 rows (10485 Keccak-f) in 5202.5s
+proof: 143411 bytes (140.0 KiB): opened values 52000 B, WHIR opening 72235 B, ring switch and zerocheck 19176 B
+2^18 rows, 1625 columns, 22 packed variables: 94069548 non-free gates (94041082 AND, 28466 OR), 563964415 XOR, 659074989 wires, 1041024 inputs; planned in 21.3s; garbled 1505 MB in 56.9s with 2256536 live slots at peak
+  zerocheck sumcheck                1227336    1.3%
+  stark transcript (sponge)        10531194   11.2%
+  air constraints                  10736110   11.4%
+  zerocheck closing                   39493    0.0%
+  column combination               11582352   12.3%
+  ring switch statement              835688    0.9%
+  ring switch closing              31633960   33.6%
+  transcript (sponge)               1603940    1.7%
+  initial claim                        8747    0.0%
+  sumcheck rounds                    189662    0.2%
+  leaf hashes                       3320880    3.5%
+  merkle paths                     14613722   15.5%
+  cap selection                      301488    0.3%
+  query folds                       2624400    2.8%
+  query points                            0    0.0%
+  claim combination                  686704    0.7%
+  final polynomial at queries        615336    0.7%
+  closing eq weights                 308367    0.3%
+  closing query weights             3069960    3.3%
+  closing identity                   140209    0.1%
+	Percent of CPU this job got: 586%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:28:51
+	Maximum resident set size (kbytes): 6102204
