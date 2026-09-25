@@ -1,0 +1,25 @@
+== 2^5
+proved 2^5 rows (1 Keccak-f) in 127.0ms
+2^5 rows, 1625 columns, 9 packed variables: 44573121 non-free gates (44553962 AND, 19159 OR), 271144104 XOR, 316303467 wires, 586240 inputs; planned in 15.5s; garbled 713 MB in 35.2s with 1581905 live slots at peak
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 102.15s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:42.31
+	Maximum resident set size (kbytes): 733172
+== 2^8
+proved 2^8 rows (10 Keccak-f) in 1.1s
+2^8 rows, 1625 columns, 12 packed variables: 66459859 non-free gates (66436131 AND, 23728 OR), 401781003 XOR, 468984672 wires, 743808 inputs; planned in 23.2s; garbled 1063 MB in 52.9s with 1598400 live slots at peak
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 150.16s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 2:31.27
+	Maximum resident set size (kbytes): 1029112
+== 2^12
+proved 2^12 rows (163 Keccak-f) in 22.1s
+2^12 rows, 1625 columns, 16 packed variables: 77736394 non-free gates (77709954 AND, 26440 OR), 467521369 XOR, 546132005 wires, 874240 inputs; planned in 24.3s; garbled 1243 MB in 52.9s with 1805751 live slots at peak
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 99.43s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:39.69
+	Maximum resident set size (kbytes): 620992
+== 2^16
+proved 2^16 rows (2621 Keccak-f) in 1610.2s
+2^16 rows, 1625 columns, 20 packed variables: 88680747 non-free gates (88652316 AND, 28431 OR), 531513041 XOR, 621191550 wires, 997760 inputs; planned in 27.8s; garbled 1418 MB in 66.3s with 1992239 live slots at peak
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1704.41s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 28:24.60
+	Maximum resident set size (kbytes): 1539720
+DONE

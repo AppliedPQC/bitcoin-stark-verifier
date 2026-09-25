@@ -1,0 +1,7 @@
+Lamport bit reveal in tapscript (paper/data/lamport_cost.rs, run in poseidon2's test harness
+with bitcoin-scriptexec, 2026-09-24). Per bit: OP_HASH160 OP_DUP <h0> OP_EQUAL OP_SWAP <h1>
+OP_EQUAL OP_BOOLOR OP_VERIFY; witness: one 16-byte preimage.
+1 bits: script 50 B (50.00/bit), witness pushes 17 B, ok=true
+997 bits: script 48854 B (49.00/bit), witness pushes 16949 B, ok=true
+998 bits: script 48903 B (49.00/bit), witness pushes 16966 B, ok=true  (1000-item stack limit)
+wrong preimages rejected: true (all n)

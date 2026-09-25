@@ -1,0 +1,28 @@
+== streamed 2^20 Fri Sep 25 02:28:49 CST 2026
+proved 2^20 rows (41943 Keccak-f) in 9396.9s
+proof: 150352 bytes (146.8 KiB): opened values 52000 B, WHIR opening 79255 B, ring switch and zerocheck 19097 B
+2^20 rows, 1625 columns, 24 packed variables: 99613898 non-free gates (99584312 AND, 29586 OR), 595483891 XOR, 696206783 wires, 1108992 inputs; planned in 8.2s; garbled 1593 MB in 41.8s with 2012661 live slots at peak
+  zerocheck sumcheck                1235902    1.2%
+  stark transcript (sponge)        10562187   10.6%
+  air constraints                  10744858   10.8%
+  zerocheck closing                   43867    0.0%
+  column combination               11582352   11.6%
+  ring switch statement              835688    0.8%
+  ring switch closing              33949702   34.1%
+  transcript (sponge)               1393671    1.4%
+  initial claim                        8747    0.0%
+  sumcheck rounds                    206904    0.2%
+  leaf hashes                       3486924    3.5%
+  merkle paths                     17786864   17.9%
+  cap selection                      155564    0.2%
+  query folds                       2755620    2.8%
+  query points                            0    0.0%
+  claim combination                  774180    0.8%
+  final polynomial at queries        117947    0.1%
+  closing eq weights                 378351    0.4%
+  closing query weights             3559331    3.6%
+  closing identity                    35239    0.0%
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 9447.10s
+== streamed 2^18 Fri Sep 25 05:06:16 CST 2026
+
+[exited with code 0]

@@ -1,0 +1,25 @@
+== stored 2^5
+stored 2^5 rows: 44553962 AND, 19159 OR, 271144104 XOR, 316303467 wires; built in 282.8s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 287.20s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 5:13.64
+	Maximum resident set size (kbytes): 12992188
+== streamed 2^5
+2^5 rows, 1625 columns, 9 packed variables: 44573121 non-free gates (44553962 AND, 19159 OR), 271144104 XOR, 316303467 wires, 586240 inputs; planned in 9.4s; garbled 713 MB in 23.5s with 1581905 live slots at peak
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 77.61s
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:17.78
+	Maximum resident set size (kbytes): 728068
+== old adder 2^5
+2^5 rows, 1625 columns, 9 packed variables: 58997590 non-free gates (58978431 AND, 19159 OR), 244035350 XOR, 303619182 wires, 586240 inputs; planned in 8.0s; garbled 943 MB in 27.0s with 2041960 live slots at peak
+  stark transcript (sponge)        19410503   32.9%
+  transcript (sponge)               1020777    1.7%
+  leaf hashes                       3350840    5.7%
+  merkle paths                      4233800    7.2%
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 76.03s
+== old adder 2^8
+2^8 rows, 1625 columns, 12 packed variables: 85768603 non-free gates (85744875 AND, 23728 OR), 365479158 XOR, 451991571 wires, 743808 inputs; planned in 14.8s; garbled 1372 MB in 49.9s with 2214362 live slots at peak
+  stark transcript (sponge)        20939026   24.4%
+  transcript (sponge)               1609766    1.9%
+  leaf hashes                       5193802    6.1%
+  merkle paths                      9991768   11.6%
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 142.17s
+DONE
