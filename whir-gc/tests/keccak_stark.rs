@@ -174,10 +174,15 @@ fn whir_config(p: &Params, packed: usize) -> WhirConfig<F, F, Challenger> {
 }
 
 fn config(p: &Params) -> (Cfg, usize) {
+    config_with(p, |packed| whir_config(p, packed))
+}
+
+/// `config` with the WHIR schedule chosen by `whir` from the packed variables.
+fn config_with(p: &Params, whir: impl FnOnce(usize) -> WhirConfig<F, F, Challenger>) -> (Cfg, usize) {
     let shape = TableShape::new(p.log_height, NUM_KECCAK_BINARY_COLS);
     let (arity, _) = plan_stacked_layout(&[shape]);
     let packed = arity - stark::ABSORBED;
-    let whir = whir_config(p, packed);
+    let whir = whir(packed);
     let cap_height = recommended_cap_height(&whir);
     let mmcs = Mmcs::new(Hash::new(Blake3), Compress::new(Blake3), cap_height);
     let prover: BooleanWhirProver<F, BooleanWhirDomain, Mmcs, Challenger> =
@@ -549,8 +554,11 @@ fn inputs(p: &Params, run: &Run) -> Inputs {
 // Tests.
 // ---------------------------------------------------------------------------
 
+/// Rate 1/32, folding 4, 110 bits per WHIR term; `WHIR_GC_TERM_BITS` overrides
+/// the per-term target (for example about 200 for a quantum target of 100 bits).
 fn params(log_height: usize) -> Params {
-    Params { log_height, log_inv_rate: 5, folding: 4, term_bits: 110 }
+    let term_bits = std::env::var("WHIR_GC_TERM_BITS").ok().map_or(110, |s| s.parse().expect("term bits"));
+    Params { log_height, log_inv_rate: 5, folding: 4, term_bits }
 }
 
 /// The reference accepts real Keccak-f proofs, its transcript matching
@@ -696,12 +704,72 @@ fn full_verifier_circuit_on_the_2_18_schedule() {
     streamed_case(log_height);
 }
 
+/// The same full verifier as a stored circuit (`CircuitAdapter`), for the
+/// memory comparison with the streaming garbler: build it, evaluate it on the
+/// honest witness, report its size. `WHIR_GC_LOG_HEIGHT` sets the trace height.
+#[test]
+#[ignore]
+fn stored_build_of_the_full_verifier() {
+    use garbled_snark_verifier::circuits::sect233k1::builder::CircuitAdapter;
+    let _heavy = heavy();
+    let log_height = std::env::var("WHIR_GC_LOG_HEIGHT").ok().map_or(5, |s| s.parse().expect("a log height"));
+    let p = params(log_height);
+    let run = prove_and_log(&p);
+    let inp = inputs(&p, &run);
+    let t = std::time::Instant::now();
+    let mut b = CircuitAdapter::default();
+    let (shape, witness) = build_full(&mut b, &inp, &inp);
+    let build_time = t.elapsed();
+    let counts = b.gate_counts();
+    let wires = b.eval_gates(&witness);
+    assert!(wires[shape.output], "2^{log_height} rows: the stored circuit accepts");
+    eprintln!(
+        "stored 2^{log_height} rows: {} AND, {} OR, {} XOR, {} wires; built in {:.1?}",
+        counts.direct_and,
+        counts.direct_or,
+        counts.direct_xor,
+        b.next_wire(),
+        build_time
+    );
+}
+
+/// The WHIR schedule of a configuration: queries and proof-of-work bits per
+/// round, for the post-quantum analysis (grinding is what Grover speeds up).
+#[test]
+#[ignore]
+fn whir_schedule_of_the_measured_configurations() {
+    for log_height in [5usize, 8, 12, 16, 18, 20] {
+        let p = params(log_height);
+        let (_cfg, packed) = config(&p);
+        let w = whir_config(&p, packed);
+        eprintln!(
+            "2^{log_height} rows, {packed} packed variables: starting folding pow {}, commitment OOD {}, folding {:?}",
+            w.starting_folding_pow_bits(),
+            w.commitment_ood_samples(),
+            w.folding_schedule()
+        );
+        for (i, r) in w.round_parameters().iter().enumerate() {
+            eprintln!(
+                "    round {i}: {} queries, pow {} bits, folding pow {} bits, {} OOD",
+                r.num_queries, r.pow_bits, r.folding_pow_bits, r.ood_samples
+            );
+        }
+        let t = w.terminal();
+        eprintln!(
+            "    terminal: {} queries, pow {} bits; final folding pow {} bits",
+            t.num_queries,
+            t.pow_bits,
+            w.final_folding_pow_bits()
+        );
+    }
+}
+
 /// Plonky3's own security assessment of the configurations measured: every
 /// soundness term of the multi-STARK statement and their composition.
 #[test]
 fn security_of_the_measured_configurations() {
     let air = KeccakBinaryAir::assuming_boolean_trace();
-    for log_height in [5usize, 8, 12, 16, 18] {
+    for log_height in [5usize, 8, 12, 16, 18, 20] {
         let p = params(log_height);
         let (cfg, packed) = config(&p);
         let (mut ch, _) = challenger(false);
@@ -715,6 +783,111 @@ fn security_of_the_measured_configurations() {
         );
         for term in report.terms() {
             eprintln!("    {term:?}");
+        }
+    }
+}
+
+/// The verifier's input bits by proof component, from the WHIR schedule
+/// alone: what the dispute must reveal on-chain. The layout is `inputs`'s and
+/// `build_full`'s: 128 bits per field element, 256 per digest, full Merkle
+/// paths below each cap.
+fn input_bits(log_height: usize, whir: &WhirConfig<F, F, Challenger>) -> Vec<(&'static str, usize)> {
+    const E: usize = 128;
+    const D: usize = 256;
+    let scfg = stark::Config { log_height, width: NUM_KECCAK_BINARY_COLS, pow_bits: 0, seeds: Default::default() };
+    let packed = scfg.packed_vars();
+    let cap_h = recommended_cap_height(whir);
+    let tensors = stark::DIM * if scfg.sends_successor() { 3 } else { 1 };
+    let sumcheck = |rounds: usize, pow: usize| rounds * (2 + usize::from(pow > 0)) * E;
+    let mut caps = 0;
+    let mut rows = 0;
+    let mut paths = 0;
+    let mut rest = whir.commitment_ood_samples() * E + E + sumcheck(whir.round_folding_factor(0), whir.starting_folding_pow_bits());
+    let mut open = |queries: usize, index_width: usize, folding: usize| {
+        let h = cap_h.min(index_width);
+        caps += (1 << h) * D;
+        rows += queries * (1 << folding) * E;
+        paths += queries * (index_width - h) * D;
+    };
+    for (i, r) in whir.round_parameters().iter().enumerate() {
+        open(r.num_queries, r.log_folded_domain_size, whir.round_folding_factor(i));
+        rest += r.ood_samples * E + usize::from(r.pow_bits > 0) * E + sumcheck(whir.round_folding_factor(i + 1), r.folding_pow_bits);
+    }
+    let fr = whir.final_round_config();
+    let last = whir.folding_schedule().len() - 1;
+    open(fr.num_queries, fr.log_folded_domain_size, whir.round_folding_factor(last));
+    let final_poly = (1 << whir.final_sumcheck_rounds()) * E;
+    rest += final_poly + usize::from(fr.pow_bits > 0) * E + sumcheck(whir.final_sumcheck_rounds(), whir.final_folding_pow_bits());
+    vec![
+        ("opened values", 2 * NUM_KECCAK_BINARY_COLS * E),
+        ("zerocheck", (1 + 4 * log_height) * E),
+        ("ring switch", (tensors + 2 * packed + 1) * E),
+        ("WHIR caps", caps),
+        ("WHIR leaf rows", rows),
+        ("WHIR Merkle paths", paths),
+        ("WHIR other", rest),
+    ]
+}
+
+/// A WHIR schedule with a grinding budget of `pow` bits per round instead of
+/// the profile's minimum: more grinding buys fewer queries.
+fn whir_with_budget(p: &Params, packed: usize, pow: usize) -> Option<WhirConfig<F, F, Challenger>> {
+    let parameters = p3_whir::ProtocolParameters {
+        starting_log_inv_rate: p.log_inv_rate,
+        round_log_inv_rates: Vec::new(),
+        folding_factor: p3_whir::FoldingFactor::Constant(p.folding),
+        soundness_type: p3_whir::SecurityAssumption::JohnsonBound,
+        security_level: p.term_bits,
+        pow_bits: pow,
+    };
+    WhirConfig::new_with_domain(packed, parameters, &BooleanWhirDomain::default()).ok()
+}
+
+/// The input-size study: input bits and their split for the measured
+/// configurations (checked against the circuits' measured input counts), then
+/// across rates, folding factors and grinding budgets at `WHIR_GC_LOG_HEIGHT`.
+#[test]
+#[ignore]
+fn input_bits_of_whir_configurations() {
+    for (log_height, measured) in [(5usize, 586_240usize), (8, 743_808), (12, 874_240), (16, 997_760), (18, 1_041_024)] {
+        let p = params(log_height);
+        let (_cfg, packed) = config(&p);
+        let parts = input_bits(log_height, &whir_config(&p, packed));
+        let total: usize = parts.iter().map(|(_, b)| b).sum();
+        eprintln!("2^{log_height} rows: {total} input bits (measured {measured}) {parts:?}");
+    }
+    let log_height = std::env::var("WHIR_GC_LOG_HEIGHT").ok().map_or(18, |s| s.parse().expect("a log height"));
+    let (_cfg, packed) = config(&params(log_height));
+    for log_inv_rate in 3..=8 {
+        for folding in 2..=6 {
+            for pow in [0usize, 32, 40, 48] {
+                let p = Params { log_height, log_inv_rate, folding, term_bits: params(log_height).term_bits };
+                let whir = if pow == 0 { BinaryWhirProfile::proven_list_decoding(p.term_bits, log_inv_rate, folding).config::<F, F, Challenger, _>(packed, &BooleanWhirDomain::default()).ok() } else { whir_with_budget(&p, packed, pow) };
+                let Some(whir) = whir else {
+                    eprintln!("rate 1/{} folding {folding} pow {pow}: refused", 1 << log_inv_rate);
+                    continue;
+                };
+                let parts = input_bits(log_height, &whir);
+                let total: usize = parts.iter().map(|(_, b)| b).sum();
+                let security = if pow == 48 && folding == 4 {
+                    let air = KeccakBinaryAir::assuming_boolean_trace();
+                    let (cfg, _) = config_with(&p, |_| whir.clone());
+                    let (mut ch, _) = challenger(false);
+                    let (_pk, vk) = setup(&cfg, &[&air], &mut ch).expect("setup");
+                    let instances = VerifierInstances::new(vec![VerifierInstance::new(&air, &vk, log_height, &[])]);
+                    let report = p3_multi_stark::security::security_report(&cfg, &instances).expect("security report");
+                    format!(" {:.2} bits composed, unassessed {:?};", report.security_bits().unwrap_or(f64::NAN), report.unassessed_components())
+                } else {
+                    String::new()
+                };
+                let queries: Vec<usize> = whir.round_parameters().iter().map(|r| r.num_queries).chain([whir.terminal().num_queries]).collect();
+                eprintln!(
+                    "rate 1/{} folding {folding} pow {pow} (max {}):{security} queries {queries:?}, {total} input bits, WHIR {} {parts:?}",
+                    1 << log_inv_rate,
+                    whir.max_pow_bits(),
+                    parts[3..].iter().map(|(_, b)| b).sum::<usize>()
+                );
+            }
         }
     }
 }
