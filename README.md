@@ -12,10 +12,9 @@ no other disabled opcode:
 | [`whir`](whir/) | The WHIR verifier in Script on top of it, run end to end against Plonky3's prover |
 | [`whir-gc`](whir-gc/) | Plonky3's full multi-STARK verifier over `GF(2^128)` and Blake3 as a Boolean circuit, garbled by streaming on GOAT's [`bitvm-gc`](https://github.com/GOATNetwork/bitvm-gc) |
 
-| Document | What it covers |
-| --- | --- |
-| 📄 [Algorithm and implementation review](docs/whir-review.pdf) | The STIR and WHIR proximity tests, and what the Script verifier checks and does not |
-| 📄 [Paper: Garbling a Post-Quantum STARK Verifier for Bitcoin](paper/garbled-stark-verifier.pdf) | The garbled verifier, its security and post-quantum analysis, a BitVM3-style protocol with its on-chain cost, and the measurements |
+📄 **[Paper: Garbling a Post-Quantum STARK Verifier for Bitcoin](paper/garbled-stark-verifier.pdf)**:
+the garbled verifier, its security and post-quantum analysis, a BitVM3-style
+protocol with its on-chain cost, and the measurements.
 
 ```
 cargo test                              # everything: 131 tests, 6 more ignored as heavy

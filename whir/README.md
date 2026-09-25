@@ -8,10 +8,6 @@ Script, and verifies real Plonky3 proofs end to end:
 - query openings;
 - constraint batching and the closing identity.
 
-📄 **[Algorithm and implementation review](../docs/whir-review.pdf)**: a formal
-account of the STIR and WHIR proximity tests, what this verifier checks, what it
-does not, and why. Source: [`docs/whir-review.tex`](../docs/whir-review.tex).
-
 ```
 cargo test -p whir                      # all of this crate's tests
 cargo test -p whir --test end_to_end    # a real Plonky3 proof, in script
@@ -55,7 +51,7 @@ is opened nor where it sits.
 
 - **Challenges are unchooseable.** Every one is squeezed after the values it
   depends on are absorbed. Supplying them instead is not a shortcut but a
-  soundness error of exactly one — the review works out why.
+  soundness error of exactly one.
 - **An opening is one unit.** The row is bound to its leaf by
   `merkle::hash_row` (Plonky3's `PaddingFreeSponge`, checked against it on a row
   from a real proof), the path recomputes the root, and that root is the
